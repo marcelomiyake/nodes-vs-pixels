@@ -286,7 +286,15 @@ impl App {
                 let scrolled = self.autoscroll(page, measure);
                 self.drag(scrolled)
             }
-            Event::Resize => Outcome::default(),
+            // Chrome keeps an input's scroll when it narrows, even with the
+            // caret out of view, and within the text when it widens.
+            Event::Resize => {
+                for (&field, editor) in &mut self.editors {
+                    let text = InputText::new(field, self.state.text(field), measure);
+                    editor.scroll_by(&text, content_width(page, field), 0.0);
+                }
+                Outcome::default()
+            }
             Event::Response(result) => self.respond(result, page, measure),
         };
         if outcome.blink {
@@ -337,8 +345,16 @@ impl App {
         }
     }
 
+    /// Whether focus came in at the first control without a click, until the
+    /// release of the key that brought it tells which way it went.
+    #[must_use]
+    pub const fn entering_first(&self) -> bool {
+        matches!(self.entering, Some(Entering::First { .. }))
+    }
+
     /// The text input being edited, if the canvas has focus in one.
-    fn editing(&self) -> Option<Field> {
+    #[must_use]
+    pub fn editing(&self) -> Option<Field> {
         match self.focus.filter(|_| self.canvas == Canvas::Focused)? {
             Control::Field(Field::AcceptTerms) | Control::Button => None,
             Control::Field(field) => Some(field),
@@ -1195,7 +1211,9 @@ mod tests {
         // comes up: Shift+Tab enters at the last.
         send(&mut app, Event::Focus);
         assert_eq!(selection(&app), (0, 3));
+        assert!(app.entering_first());
         assert!(send(&mut app, tab_up(true)).blink);
+        assert!(!app.entering_first());
         assert_eq!(focus(&app), Some(Control::Button));
         // The first input never really had focus.
         assert_eq!(app.state.error(Field::FullName), None);
@@ -1763,6 +1781,32 @@ mod tests {
             key.shift = true;
         });
         assert_eq!(mac.state.text(Field::FullName), "a");
+    }
+
+    #[test]
+    fn a_resize_keeps_the_scroll_within_the_text() {
+        let phone = Viewport {
+            width: 390.0,
+            height: 844.0,
+            media_width: 390.0,
+        };
+        let mut app = focused();
+        // 792px of text.
+        type_text(&mut app, &"Ada King ".repeat(11));
+        let scroll = |app: &App| app.editor(Field::FullName).scroll;
+        let wide = scroll(&app);
+        assert_eq!(wide, 792.0 - content_width(&page(&app), Field::FullName));
+        let narrow = layout(phone, &app.state, &FixedMeasure);
+        app.handle(Event::Resize, &narrow, &FixedMeasure);
+        assert_eq!(scroll(&app), wide);
+        let end = Key {
+            key: "End".to_owned(),
+            ..Key::default()
+        };
+        app.handle(Event::Key(end), &narrow, &FixedMeasure);
+        assert!(scroll(&app) > wide);
+        send(&mut app, Event::Resize);
+        assert_eq!(scroll(&app), wide);
     }
 
     #[test]

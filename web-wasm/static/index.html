@@ -12,13 +12,11 @@
       @font-face{font-family:Inter;src:url(/fonts/inter-latin.woff2) format("woff2");font-weight:400 600;font-display:block}
       html,body{margin:0}
       body{background:#f1f5f9}
-      #app{position:relative}
-      #app canvas{position:absolute;top:0;left:0}
-      #app .overlay{position:absolute;margin:0;padding:0;border:0;opacity:0;box-sizing:border-box}
+      #app{display:block;outline:none;-webkit-tap-highlight-color:transparent}
     </style>
   </head>
   <body>
-    <main id="app"></main>
+    <canvas id="app" tabindex="0" role="main" aria-label="Create your account" aria-busy="true"></canvas>
     <script type="module">
       import init from './pkg/web_wasm.js';
       init();

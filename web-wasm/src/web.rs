@@ -1,6 +1,7 @@
-//! Browser glue: paints [`scene`] on a canvas, keeps the [`overlay`] controls
-//! on top of it and feeds their events to [`App`]. The logic it drives is
-//! tested natively; this module only talks to the DOM.
+//! Browser glue: paints [`scene`] on the page's only element, a canvas, and
+//! feeds the keys, mouse buttons, focus and clipboard events it receives to
+//! [`App`]. The logic it drives is tested natively; this module only talks
+//! to the DOM.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -11,19 +12,19 @@ use js_sys::{Array, Function, Intl, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    CanvasRenderingContext2d, Document, EventTarget, HtmlCanvasElement, HtmlElement,
-    HtmlInputElement, Path2d, Request, RequestInit, Response, Window,
+    CanvasRenderingContext2d, ClipboardEvent, Document, EventTarget, HtmlCanvasElement,
+    KeyboardEvent, MouseEvent, Path2d, Request, RequestInit, Response, Window,
 };
 
-use crate::app::{App, Effect, Event};
+use crate::form::Status;
 use crate::grpc_web::{self, CallError, RawResponse};
-use crate::layout::{BORDER, Rect, TEXT_FIELDS, Viewport, layout};
-use crate::overlay::{self, Prop, SUBMIT, Update};
+use crate::input::{App, Device, Effect, Event, Key, Outcome};
+use crate::layout::{Content, Layout, Rect, Viewport, layout};
 use crate::proto::{SignUpRequest, SignUpResponse};
-use crate::scene::{self, Control, Painter, char_offset};
+use crate::scene::{self, Control, Painter};
 use crate::style::{Shadow, TextStyle};
 use crate::text::{FontMetrics, Measure};
-use crate::tokens::{FONT_FALLBACK, FONT_FAMILY, spacing, text};
+use crate::tokens::text;
 
 const SIGN_UP: &str = "/signup.v1.SignupService/SignUp";
 /// Chrome's caret blink interval.
@@ -50,13 +51,10 @@ async fn run() -> Result<(), JsValue> {
             web_sys::console::warn_1(&error);
         }
     }
-    let root: HtmlElement = document
+    let canvas: HtmlCanvasElement = document
         .get_element_by_id("app")
         .ok_or("no #app")?
         .dyn_into()?;
-    let canvas: HtmlCanvasElement = document.create_element("canvas")?.dyn_into()?;
-    canvas.set_attribute("aria-hidden", "true")?;
-    root.append_child(&canvas)?;
     // An opaque canvas lets Chrome antialias text with subpixels, as in the DOM.
     let options = Object::new();
     Reflect::set(&options, &"alpha".into(), &false.into())?;
@@ -64,49 +62,57 @@ async fn run() -> Result<(), JsValue> {
         .get_context_with_context_options("2d", &options)?
         .ok_or("no 2d context")?
         .dyn_into()?;
-    let elements = build_overlay(&document, &root)?;
-    let hover = window
-        .match_media("(hover: hover)")?
-        .is_some_and(|query| query.matches());
+    let platform = window.navigator().platform().unwrap_or_default();
+    let device = Device {
+        mac: platform.starts_with("Mac") || platform.starts_with("iP"),
+        hover: window
+            .match_media("(hover: hover)")?
+            .is_some_and(|query| query.matches()),
+    };
+    let measure = CanvasMeasure::new(context.clone());
+    let app = App::new(device);
+    let page = layout(viewport(&window, &document)?, &app.state, &measure);
     let browser = Browser {
-        measure: CanvasMeasure::new(context.clone()),
         window,
         document,
-        root,
         canvas,
         context,
-        elements,
-        app: App::default(),
+        measure,
+        app,
+        page,
         blink: None,
         blink_timer: 0,
+        frame: None,
+        framing: false,
+        entry_scroll: None,
     };
     let shared = Rc::new(RefCell::new(browser));
-    listen(&shared, hover)?;
+    listen(&shared)?;
     shared.borrow_mut().render()
 }
 
 struct Browser {
     window: Window,
     document: Document,
-    root: HtmlElement,
     canvas: HtmlCanvasElement,
     context: CanvasRenderingContext2d,
     measure: CanvasMeasure,
-    elements: HashMap<String, HtmlElement>,
     app: App,
+    /// The layout last painted, which events' points refer to.
+    page: Layout,
     /// Toggles the painted caret, every [`BLINK_MS`] from `blink_timer`'s start.
     blink: Option<Function>,
     blink_timer: i32,
+    /// Brings an [`Event::Autoscroll`] on the next animation frame.
+    frame: Option<Function>,
+    /// Whether `frame` is requested.
+    framing: bool,
+    /// How far the page was scrolled before focus came in at its first
+    /// control, which the release of Shift+Tab takes back.
+    entry_scroll: Option<f64>,
 }
 
 impl Browser {
-    fn element(&self, id: &str) -> Result<HtmlElement, JsValue> {
-        self.elements
-            .get(id)
-            .cloned()
-            .ok_or_else(|| JsValue::from_str(&format!("no overlay element #{id}")))
-    }
-
     /// Starts the caret's blink period over, so that it stays visible for a
     /// whole period after it moves, as in Chrome.
     fn restart_blink(&mut self) -> Result<(), JsValue> {
@@ -120,16 +126,25 @@ impl Browser {
         Ok(())
     }
 
-    fn render(&mut self) -> Result<(), JsValue> {
-        let html = self.document.document_element().ok_or("no <html>")?;
-        let viewport = Viewport {
-            width: f64::from(html.client_width()),
-            height: self.window.inner_height()?.as_f64().unwrap_or_default(),
-            media_width: self.window.inner_width()?.as_f64().unwrap_or_default(),
-        };
-        let page = layout(viewport, &self.app.state, &self.measure);
-        self.root.style().set_property("height", &px(page.height))?;
+    /// Requests the next animation frame, while a selection drag scrolls.
+    fn request_frame(&mut self) -> Result<(), JsValue> {
+        if let Some(frame) = &self.frame {
+            self.window.request_animation_frame(frame)?;
+            self.framing = true;
+        }
+        Ok(())
+    }
 
+    /// Lays the page out for the viewport as it is now.
+    fn lay_out(&mut self) -> Result<(), JsValue> {
+        let viewport = viewport(&self.window, &self.document)?;
+        self.page = layout(viewport, &self.app.state, &self.measure);
+        Ok(())
+    }
+
+    fn render(&mut self) -> Result<(), JsValue> {
+        self.lay_out()?;
+        let page = &self.page;
         let ratio = self.window.device_pixel_ratio();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let (width, height) = (
@@ -144,6 +159,11 @@ impl Browser {
         let style = self.canvas.style();
         style.set_property("width", &px(page.width))?;
         style.set_property("height", &px(page.height))?;
+        style.set_property("cursor", self.app.cursor(page, &self.measure))?;
+        // Tells scripts, such as the browser tests, when the page is ready.
+        let busy = self.app.state.status() == Status::Submitting;
+        self.canvas
+            .set_attribute("aria-busy", if busy { "true" } else { "false" })?;
         self.context
             .set_transform(ratio, 0.0, 0.0, ratio, 0.0, 0.0)?;
         let mut painter = CanvasPainter {
@@ -151,148 +171,159 @@ impl Browser {
             ratio,
         };
         scene::paint(
-            &page,
+            page,
             &self.app.state,
-            &self.app.ui,
+            &self.app.interaction(page),
             &self.measure,
             &mut painter,
         );
-        self.apply(overlay::updates(&page, &self.app.state))
-    }
-
-    fn apply(&self, updates: Vec<Update>) -> Result<(), JsValue> {
-        for update in updates {
-            let element = self.element(&update.id)?;
-            for prop in update.props {
-                match prop {
-                    Prop::Rect(Some(rect)) => {
-                        element.set_hidden(false);
-                        place(&element, rect)?;
-                    }
-                    Prop::Rect(None) => element.set_hidden(true),
-                    Prop::Text(content) => {
-                        if element.text_content().as_deref() != Some(content.as_str()) {
-                            element.set_text_content(Some(&content));
-                        }
-                    }
-                    Prop::Attribute(name, Some(value)) => element.set_attribute(name, &value)?,
-                    Prop::Attribute(name, None) => element.remove_attribute(name)?,
-                    Prop::Value(value) => {
-                        let input: &HtmlInputElement = element.unchecked_ref();
-                        if input.value() != value {
-                            input.set_value(&value);
-                        }
-                    }
-                    Prop::Checked(checked) => {
-                        element
-                            .unchecked_ref::<HtmlInputElement>()
-                            .set_checked(checked);
-                    }
-                }
-            }
-        }
         Ok(())
     }
+
+    /// Scrolls a control that focus moved to into view as Chrome scrolls a
+    /// focused element: not at all when it is in view, to its nearest edge
+    /// when it is partly in view, and to the middle of the view otherwise.
+    fn reveal(&self, control: Control) -> Result<(), JsValue> {
+        let Content::Form(form) = &self.page.content else {
+            return Ok(());
+        };
+        let rect = match control {
+            Control::Field(Field::AcceptTerms) => form.terms.check,
+            Control::Field(field) => form
+                .fields
+                .iter()
+                .find(|layout| layout.field == field)
+                .map_or_else(Rect::default, |layout| layout.input),
+            Control::Button => form.button,
+        };
+        let html = self.document.document_element().ok_or("no <html>")?;
+        let height = f64::from(html.client_height());
+        let top = self.window.scroll_y()?;
+        let bottom = top + height;
+        let y = if rect.bottom() <= top || rect.y >= bottom {
+            rect.y + (rect.height - height) / 2.0
+        } else if rect.y < top {
+            rect.y
+        } else if rect.bottom() > bottom {
+            rect.bottom() - height
+        } else {
+            return Ok(());
+        };
+        self.window
+            .scroll_to_with_x_and_y(self.window.scroll_x()?, y);
+        Ok(())
+    }
+}
+
+/// The viewport, whose width excludes a vertical scrollbar.
+fn viewport(window: &Window, document: &Document) -> Result<Viewport, JsValue> {
+    let html = document.document_element().ok_or("no <html>")?;
+    Ok(Viewport {
+        width: f64::from(html.client_width()),
+        height: window.inner_height()?.as_f64().unwrap_or_default(),
+        media_width: window.inner_width()?.as_f64().unwrap_or_default(),
+    })
 }
 
 fn px(value: f64) -> String {
     format!("{value}px")
 }
 
-fn place(element: &HtmlElement, rect: Rect) -> Result<(), JsValue> {
-    let style = element.style();
-    style.set_property("left", &px(rect.x))?;
-    style.set_property("top", &px(rect.y))?;
-    style.set_property("width", &px(rect.width))?;
-    style.set_property("height", &px(rect.height))
-}
-
-fn css_font(style: TextStyle) -> String {
-    format!(
-        "{} {}px/{}px {FONT_FAMILY}, {FONT_FALLBACK}",
-        style.weight, style.size, style.line_height
-    )
-}
-
-/// Creates the transparent controls, styled like the React app's elements
-/// so that input scrolling, caret and selection offsets match its own.
-fn build_overlay(
-    document: &Document,
-    root: &HtmlElement,
-) -> Result<HashMap<String, HtmlElement>, JsValue> {
-    let mut elements: HashMap<String, HtmlElement> = HashMap::new();
-    for template in overlay::templates() {
-        let element: HtmlElement = document.create_element(template.tag)?.dyn_into()?;
-        element.set_id(&template.id);
-        element.set_class_name("overlay");
-        for (name, value) in &template.attributes {
-            element.set_attribute(name, value)?;
-        }
-        if !template.text.is_empty() {
-            element.set_text_content(Some(template.text));
-        }
-        if let Some(style) = template.style {
-            element.style().set_property("font", &css_font(style))?;
-        }
-        if template.tag == "input" && template.style.is_some() {
-            let style = element.style();
-            style.set_property("padding", &format!("0 {}px", spacing::CONTROL_X))?;
-            style.set_property("border", &format!("{BORDER}px solid"))?;
-        }
-        let parent = template.parent.and_then(|id| elements.get(id));
-        parent
-            .map_or(root, |parent| parent)
-            .append_child(&element)?;
-        elements.insert(template.id, element);
-    }
-    Ok(elements)
-}
-
 /// Handles `event` with the browser state released before any DOM call that
-/// could fire further events synchronously.
-fn dispatch(shared: &Shared, event: Event) {
-    let Ok(mut browser) = shared.try_borrow_mut() else {
-        // Fired by a DOM change made while handling another event.
-        let shared = Rc::clone(shared);
-        spawn_local(async move { dispatch(&shared, event) });
-        return;
-    };
-    let restart = event.shows_caret();
-    let effect = browser.app.handle(event);
-    let rendered = browser.render().and_then(|()| {
-        if restart {
-            browser.restart_blink()
-        } else {
-            Ok(())
-        }
-    });
-    let focus = match &effect {
-        Some(Effect::Focus(id)) => browser.element(id).ok(),
-        _ => None,
-    };
-    drop(browser);
-    if let Err(error) = rendered.and_then(|()| focus.map_or(Ok(()), |element| element.focus())) {
-        web_sys::console::error_1(&error);
-    }
-    if let Some(Effect::Send(request)) = effect {
+/// could fire further events synchronously, and returns what the event's
+/// listener must still do; `None` when it is handled later.
+fn dispatch(shared: &Shared, event: Event) -> Option<Outcome> {
+    let Ok(mut borrowed) = shared.try_borrow_mut() else {
+        // Fired by a DOM call made while handling another event.
         let shared = Rc::clone(shared);
         spawn_local(async move {
-            let result = sign_up(request).await;
-            dispatch(&shared, Event::Response(result));
+            dispatch(&shared, event);
+        });
+        return None;
+    };
+    // Tab, from the page or from the browser's own controls, scrolls the
+    // control it focuses into view.
+    let keyboard = matches!(event, Event::Key(_) | Event::KeyUp(_) | Event::Focus);
+    let (entering, released) = (event == Event::Focus, matches!(event, Event::KeyUp(_)));
+    let browser = &mut *borrowed;
+    let focus = browser.app.interaction(&browser.page).focus;
+    // A resize applies to the new layout.
+    let mut result = if event == Event::Resize {
+        browser.lay_out()
+    } else {
+        Ok(())
+    };
+    let mut outcome = browser.app.handle(event, &browser.page, &browser.measure);
+    result = result.and_then(|()| browser.render());
+    if outcome.blink {
+        result = result.and_then(|()| browser.restart_blink());
+    }
+    if !browser.framing && browser.app.autoscrolling(&browser.page, &browser.measure) {
+        result = result.and_then(|()| browser.request_frame());
+    }
+    let moved =
+        browser.app.interaction(&browser.page).focus.filter(|&now| {
+            Some(now) != focus && (keyboard || outcome.effect == Some(Effect::Focus))
+        });
+    if let Some(control) = moved {
+        result = result.and_then(|()| {
+            if entering {
+                browser.entry_scroll = Some(browser.window.scroll_y()?);
+            } else if let (true, Some(y)) = (released, browser.entry_scroll) {
+                // Shift+Tab brought focus in at the last control instead.
+                let x = browser.window.scroll_x()?;
+                browser.window.scroll_to_with_x_and_y(x, y);
+            }
+            browser.reveal(control)
         });
     }
+    if !browser.app.entering_first() {
+        browser.entry_scroll = None;
+    }
+    let canvas = browser.canvas.clone();
+    drop(borrowed);
+    match outcome.effect.take() {
+        Some(Effect::Focus) => result = result.and_then(|()| canvas.focus()),
+        Some(Effect::Send(request)) => {
+            let shared = Rc::clone(shared);
+            spawn_local(async move {
+                let result = sign_up(request).await;
+                dispatch(&shared, Event::Response(result));
+            });
+        }
+        effect => outcome.effect = effect,
+    }
+    if let Err(error) = result {
+        web_sys::console::error_1(&error);
+    }
+    Some(outcome)
 }
 
-fn on(
+fn on<T: JsCast>(
     target: &EventTarget,
     kind: &str,
     shared: &Shared,
-    handler: impl Fn(&web_sys::Event) -> Option<Event> + 'static,
+    handler: impl Fn(&T) -> Option<Event> + 'static,
 ) -> Result<(), JsValue> {
     let shared = Rc::clone(shared);
     let closure = Closure::<dyn Fn(web_sys::Event)>::new(move |event: web_sys::Event| {
-        if let Some(event) = handler(&event) {
-            dispatch(&shared, event);
+        let Some(event_now) = event.dyn_ref::<T>() else {
+            return;
+        };
+        let Some(outcome) = handler(event_now).and_then(|app_event| dispatch(&shared, app_event))
+        else {
+            return;
+        };
+        if let Some(Effect::Clipboard(text)) = &outcome.effect
+            && let Some(data) = event.unchecked_ref::<ClipboardEvent>().clipboard_data()
+        {
+            let _ = data.set_data("text/plain", text);
+        }
+        // The browser's own action for the key or clipboard event, such as
+        // leaving the page for Tab, runs unless the app used it; a mouse
+        // button's must run, to focus the canvas.
+        if outcome.handled && !event.type_().starts_with("mouse") {
+            event.prevent_default();
         }
     });
     target.add_event_listener_with_callback(kind, closure.as_ref().unchecked_ref())?;
@@ -301,99 +332,109 @@ fn on(
     Ok(())
 }
 
-fn listen(shared: &Shared, hover: bool) -> Result<(), JsValue> {
+fn key(event: &KeyboardEvent) -> Key {
+    Key {
+        key: event.key(),
+        shift: event.shift_key(),
+        ctrl: event.ctrl_key(),
+        alt: event.alt_key(),
+        meta: event.meta_key(),
+    }
+}
+
+/// Where a mouse event is on the canvas, which the page scrolls with.
+fn point(canvas: &HtmlCanvasElement, event: &MouseEvent) -> (f64, f64) {
+    let rect = canvas.get_bounding_client_rect();
+    (
+        f64::from(event.client_x()) - rect.left(),
+        f64::from(event.client_y()) - rect.top(),
+    )
+}
+
+fn listen(shared: &Shared) -> Result<(), JsValue> {
     let browser = shared.borrow();
-    let mut controls: Vec<(HtmlElement, Control)> = Field::ALL
-        .into_iter()
-        .map(|field| Ok((browser.element(field.key())?, Control::Field(field))))
-        .collect::<Result<_, JsValue>>()?;
-    let button = browser.element(SUBMIT)?;
-    controls.push((button.clone(), Control::Button));
-    for (element, control) in controls {
-        let target = element.clone();
-        on(&element, "focus", shared, move |_| {
-            let visible = target.matches(":focus-visible").unwrap_or(false);
-            Some(Event::Focus { control, visible })
-        })?;
-        on(&element, "blur", shared, move |_| {
-            Some(Event::Blur(control))
-        })?;
-    }
-
-    for field in TEXT_FIELDS {
-        let input: HtmlInputElement = browser.element(field.key())?.dyn_into()?;
-        let target = input.clone();
-        on(&input, "input", shared, move |_| {
-            Some(Event::Input(field, target.value()))
-        })?;
-        // A trackpad can scroll the text without changing the selection.
-        let document = browser.document.clone();
-        on(&input, "scroll", shared, move |_| caret(&document))?;
-    }
-    let document = browser.document.clone();
-    on(&browser.document, "selectionchange", shared, move |_| {
-        caret(&document)
+    let canvas = browser.canvas.clone();
+    let window = browser.window.clone();
+    on(&canvas, "focus", shared, |_: &web_sys::Event| {
+        Some(Event::Focus)
     })?;
-
-    let terms: HtmlInputElement = browser.element(Field::AcceptTerms.key())?.dyn_into()?;
-    let target = terms.clone();
-    on(&terms, "change", shared, move |_| {
-        Some(Event::Toggle(target.checked()))
+    on(&canvas, "blur", shared, |_: &web_sys::Event| {
+        Some(Event::Blur)
     })?;
-    if hover {
-        on(&button, "pointerenter", shared, |_| {
-            Some(Event::Hover(true))
-        })?;
-        on(&button, "pointerleave", shared, |_| {
-            Some(Event::Hover(false))
-        })?;
-    }
-    let form = browser.element("form")?;
-    on(&form, "submit", shared, |event| {
-        event.prevent_default();
-        Some(Event::Submit)
+    on(&canvas, "keydown", shared, |event: &KeyboardEvent| {
+        // Composition, with an input method, is the browser's.
+        (!event.is_composing()).then(|| Event::Key(key(event)))
+    })?;
+    on(&canvas, "keyup", shared, |event: &KeyboardEvent| {
+        Some(Event::KeyUp(key(event)))
+    })?;
+    let target = canvas.clone();
+    on(&canvas, "mousedown", shared, move |event: &MouseEvent| {
+        let (x, y) = point(&target, event);
+        (event.button() == 0).then(|| Event::Press {
+            x,
+            y,
+            shift: event.shift_key(),
+            clicks: u32::try_from(event.detail()).unwrap_or(1),
+        })
+    })?;
+    // The window keeps receiving the mouse while a button drags past the canvas.
+    let target = canvas.clone();
+    on(&window, "mouseup", shared, move |event: &MouseEvent| {
+        let (x, y) = point(&target, event);
+        (event.button() == 0).then_some(Event::Release { x, y })
+    })?;
+    let target = canvas.clone();
+    on(&window, "mousemove", shared, move |event: &MouseEvent| {
+        Some(Event::Pointer(Some(point(&target, event))))
+    })?;
+    on(&canvas, "mouseleave", shared, |_: &MouseEvent| {
+        Some(Event::Pointer(None))
+    })?;
+    on(&canvas, "copy", shared, |_: &ClipboardEvent| {
+        Some(Event::Copy)
+    })?;
+    on(&canvas, "cut", shared, |_: &ClipboardEvent| {
+        Some(Event::Cut)
+    })?;
+    on(&canvas, "paste", shared, |event: &ClipboardEvent| {
+        let data = event.clipboard_data()?;
+        Some(Event::Paste(data.get_data("text/plain").ok()?))
     })?;
 
     // The layout follows the viewport, whose height alone can change.
-    on(&browser.window, "resize", shared, |_| Some(Event::Resize))?;
+    on(&window, "resize", shared, |_: &web_sys::Event| {
+        Some(Event::Resize)
+    })?;
     let resized = Rc::clone(shared);
-    let observer = Closure::<dyn Fn()>::new(move || dispatch(&resized, Event::Resize));
+    let observer = Closure::<dyn Fn()>::new(move || {
+        dispatch(&resized, Event::Resize);
+    });
     let html = browser.document.document_element().ok_or("no <html>")?;
     web_sys::ResizeObserver::new(observer.as_ref().unchecked_ref())?.observe(&html);
     observer.forget();
 
     let blinking = Rc::clone(shared);
     let blink = Closure::<dyn Fn()>::new(move || {
-        let editing = blinking.try_borrow().is_ok_and(|browser| {
-            matches!(browser.app.ui.focus, Some(Control::Field(field)) if field != Field::AcceptTerms)
-        });
+        let editing = blinking
+            .try_borrow()
+            .is_ok_and(|browser| browser.app.editing().is_some());
         if editing {
             dispatch(&blinking, Event::Blink);
         }
     });
+    let framed = Rc::clone(shared);
+    let frame = Closure::<dyn Fn()>::new(move || {
+        if let Ok(mut browser) = framed.try_borrow_mut() {
+            browser.framing = false;
+        }
+        dispatch(&framed, Event::Autoscroll);
+    });
     drop(browser);
     let mut browser = shared.borrow_mut();
     browser.blink = Some(blink.into_js_value().unchecked_into());
+    browser.frame = Some(frame.into_js_value().unchecked_into());
     browser.restart_blink()
-}
-
-/// The selection and scroll position of the focused text input.
-fn caret(document: &Document) -> Option<Event> {
-    let input: HtmlInputElement = document.active_element()?.dyn_into().ok()?;
-    if input.type_() == "checkbox" {
-        return None;
-    }
-    let value = input.value();
-    let offset = |units: Option<u32>| char_offset(&value, units.unwrap_or(0) as usize);
-    let selection = (
-        offset(input.selection_start().ok()?),
-        offset(input.selection_end().ok()?),
-    );
-    let scroll_left = f64::from(input.scroll_left());
-    Some(Event::Caret {
-        selection,
-        scroll_left,
-    })
 }
 
 /// Calls the backend over gRPC-web on the page's own origin, which proxies

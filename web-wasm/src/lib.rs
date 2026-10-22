@@ -1,6 +1,6 @@
-//! The sign-up form painted on a `<canvas>`. Everything visible is drawn by
-//! this crate; transparent native controls laid over the canvas provide
-//! focus, typing, autofill and the accessibility tree.
+//! The sign-up form painted on a `<canvas>`, the page's only element. This
+//! crate draws everything visible and handles the keys, mouse buttons and
+//! clipboard itself.
 
 pub mod app;
 pub mod backspace;
@@ -74,5 +74,9 @@ mod tests {
         assert!(page.contains(&format!("background:{}", tokens::color::PAGE)));
         assert!(page.contains(&format!("/fonts/{}", tokens::FONT_FILE)));
         assert!(page.contains("<title>"));
+        assert!(page.contains(&format!(
+            r#"<canvas id="app" tabindex="0" role="main" aria-label="{}""#,
+            copy::TITLE
+        )));
     }
 }
