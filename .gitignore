@@ -147,3 +147,20 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Rust
+target/
+
+# Generated build inputs and outputs
+web-wasm/pkg/
+web-wasm/dist/
+web-react/src/gen/
+web-react/src/generated/
+
+# Test and analysis artifacts
+playwright-report/
+test-results/
+blob-report/
+.scannerwork/
+lcov.info
+lighthouse/

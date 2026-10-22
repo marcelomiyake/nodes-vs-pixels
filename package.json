@@ -1,0 +1,9 @@
+{
+  "name": "nodes-vs-pixels",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=24"
+  }
+}
