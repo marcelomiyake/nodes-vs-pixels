@@ -151,6 +151,12 @@ impl InputText {
         self.clusters.is_empty()
     }
 
+    /// Whether this is a password, shown masked.
+    #[must_use]
+    pub const fn masked(&self) -> bool {
+        self.masked
+    }
+
     /// The shown offset of the value's offset `offset`: a mask stands for a
     /// whole cluster.
     #[must_use]

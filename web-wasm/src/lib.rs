@@ -7,6 +7,7 @@ pub mod backspace;
 pub mod editing;
 pub mod form;
 pub mod grpc_web;
+pub mod input;
 pub mod layout;
 pub mod overlay;
 pub mod scene;
