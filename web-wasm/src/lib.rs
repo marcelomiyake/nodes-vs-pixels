@@ -10,6 +10,8 @@ pub mod overlay;
 pub mod scene;
 pub mod style;
 pub mod text;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 /// Messages generated from `proto/signup/v1/signup.proto`.
 #[allow(clippy::all, clippy::pedantic)]
