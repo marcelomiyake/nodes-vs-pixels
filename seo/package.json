@@ -1,0 +1,11 @@
+{
+  "name": "seo",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "inject-seo": "./inject.mjs"
+  },
+  "scripts": {
+    "test": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include=inject.mjs --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info"
+  }
+}

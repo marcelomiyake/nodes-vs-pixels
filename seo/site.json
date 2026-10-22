@@ -1,0 +1,12 @@
+{
+  "siteName": "Nodes vs Pixels",
+  "title": "Create your account · Nodes vs Pixels",
+  "description": "A sign-up form rendered twice, with React DOM nodes and with Rust WebAssembly canvas pixels, both backed by one Rust gRPC-web service.",
+  "locale": "en_US",
+  "themeColor": "#4f46e5",
+  "robots": "index, follow",
+  "urls": {
+    "web-react": "http://localhost:8081/",
+    "web-wasm": "http://localhost:8082/"
+  }
+}
