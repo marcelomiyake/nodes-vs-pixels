@@ -72,6 +72,10 @@ pub struct InputText {
     /// The left and right edges of each shown character, from where the
     /// text starts, in logical order.
     pub bounds: Vec<(f64, f64)>,
+    /// The shown text's bidirectional runs, in visual order.
+    runs: Vec<Run>,
+    /// The run of each shown character.
+    run_of: Vec<usize>,
     masked: bool,
     /// The value's characters.
     chars: Vec<char>,
@@ -114,9 +118,13 @@ impl InputText {
                 start
             }))
             .collect();
+        let bounds = measure.char_bounds(&shown, text::BODY);
+        let (runs, run_of) = runs(&crate::text::levels(&shown), &bounds);
         Self {
             value: value.to_owned(),
-            bounds: measure.char_bounds(&shown, text::BODY),
+            bounds,
+            runs,
+            run_of,
             shown,
             masked,
             chars: value.chars().collect(),
@@ -156,11 +164,97 @@ impl InputText {
         }
     }
 
-    /// Where the caret before the value's offset `offset` sits, from where
-    /// the text starts.
+    /// Where Chrome draws the caret before the value's offset `offset`, from
+    /// where the text starts: at the edge of the character after it, as its
+    /// downstream affinity has it, or of the last character; and inside a
+    /// grapheme cluster, after the cluster. At the edge of a run, it moves as
+    /// [`Self::run_edge`] says.
     #[must_use]
     pub fn caret_x(&self, offset: usize) -> f64 {
-        caret_x(&self.shown, &self.bounds, self.shown_offset(offset))
+        let Some(last) = self.bounds.len().checked_sub(1) else {
+            return 0.0;
+        };
+        let shown = self.shown_offset(offset);
+        let index = shown.min(last);
+        let run = self.run_of[index];
+        let rtl = self.runs[run].rtl();
+        let (left, right) = self.bounds[index];
+        if shown > last {
+            self.run_edge(run, !rtl)
+        } else if !self.masked && offset > 0 && self.clusters.binary_search(&offset).is_err() {
+            if rtl { left } else { right }
+        } else if shown > self.runs[run].start {
+            if rtl { right } else { left }
+        } else {
+            self.run_edge(run, rtl)
+        }
+    }
+
+    /// Where Chrome draws a caret at the left, or right, edge of the run
+    /// `run`. Where the direction changes, it moves the caret as the legacy
+    /// layout's `getInlineBoxAndOffset` did. In a run going right to left, beside a
+    /// higher run, the caret moves to the far edge of the higher runs, and
+    /// beside a lower run or the line's end, to the other edge of the runs
+    /// at its level and above. In a run going left to right, like the line,
+    /// beside a lower run, it moves to the far edge of the runs at that
+    /// level and above, unless that level comes back behind the run.
+    fn run_edge(&self, run: usize, right: bool) -> f64 {
+        let runs = &self.runs;
+        let level = runs[run].level;
+        let outer = beside(runs, run, right).map(|outer| outer.level);
+        let (run, right) = if runs[run].rtl() {
+            match outer {
+                Some(higher) if higher > level => {
+                    (farthest(runs, run, right, |next| next.level > level), right)
+                }
+                Some(same) if same == level => (run, right),
+                _ => (
+                    farthest(runs, run, !right, |next| next.level >= level),
+                    !right,
+                ),
+            }
+        } else {
+            match outer {
+                Some(lower) if lower < level => {
+                    let inner = farthest(runs, run, !right, |inner| inner.level > lower);
+                    if beside(runs, inner, !right).is_some_and(|behind| behind.level == lower) {
+                        (run, right)
+                    } else {
+                        (
+                            farthest(runs, run, right, |next| next.level >= lower),
+                            right,
+                        )
+                    }
+                }
+                _ => (run, right),
+            }
+        };
+        if right {
+            runs[run].right
+        } else {
+            runs[run].left
+        }
+    }
+
+    /// Where Home takes the caret, as Chrome finds the line's visual start:
+    /// the start of the leftmost run when it goes left to right, and
+    /// otherwise the value's start.
+    #[must_use]
+    pub fn line_start(&self) -> usize {
+        match self.runs.first() {
+            Some(run) if !self.masked && !run.rtl() => run.start,
+            _ => 0,
+        }
+    }
+
+    /// Where End takes the caret: the end of the rightmost run when it goes
+    /// left to right, and otherwise the value's end.
+    #[must_use]
+    pub fn line_end(&self) -> usize {
+        match self.runs.last() {
+            Some(run) if !self.masked && !run.rtl() => run.end,
+            _ => self.len(),
+        }
     }
 
     /// How wide the text is laid out.
@@ -326,42 +420,69 @@ fn segments(words: &[String]) -> Vec<(Range<usize>, Kind)> {
     all
 }
 
-/// Where Chrome draws the caret before character `offset`: between the
-/// characters on either side where they touch, and where the direction
-/// changes, beside the one that runs left to right like the line. It sits
-/// at the line's left edge before the first character and at its right edge
-/// after the last.
-fn caret_x(text: &str, bounds: &[(f64, f64)], offset: usize) -> f64 {
-    let Some(&(next_left, next_right)) = bounds.get(offset) else {
-        return bounds.iter().map(|&(_, right)| right).fold(0.0, f64::max);
-    };
-    let Some(&(before_left, before_right)) = offset.checked_sub(1).and_then(|i| bounds.get(i))
-    else {
-        return 0.0;
-    };
-    if (before_right - next_left).abs() <= TOUCHING {
-        before_right
-    } else if (before_left - next_right).abs() <= TOUCHING {
-        before_left
-    } else if text.chars().nth(offset - 1).is_some_and(is_rtl) {
-        // Leaving a right-to-left run.
-        next_left
-    } else {
-        // Entering one.
-        before_right
+/// Characters at one bidirectional level, next to each other in the text,
+/// which Chrome lays out as one box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Run {
+    /// The first shown character's offset, and the offset after the last.
+    start: usize,
+    end: usize,
+    level: u8,
+    left: f64,
+    right: f64,
+}
+
+impl Run {
+    /// Whether it goes right to left: odd levels do.
+    const fn rtl(&self) -> bool {
+        self.level % 2 == 1
     }
 }
 
-/// Characters of the scripts written right to left (bidirectional classes
-/// R and AL, with the marks of their blocks).
-fn is_rtl(c: char) -> bool {
-    matches!(c,
-        '\u{0590}'..='\u{08FF}'     // Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic
-        | '\u{FB1D}'..='\u{FDFF}'   // Hebrew and Arabic presentation forms
-        | '\u{FE70}'..='\u{FEFF}'   // Arabic presentation forms B
-        | '\u{10800}'..='\u{10FFF}' // Historic right-to-left scripts
-        | '\u{1E800}'..='\u{1EFFF}' // Mende Kikakui, Adlam
-    )
+/// The runs of characters at `levels`, placed at `bounds`, in visual order,
+/// and the run of each character.
+fn runs(levels: &[u8], bounds: &[(f64, f64)]) -> (Vec<Run>, Vec<usize>) {
+    let mut runs: Vec<Run> = Vec::new();
+    for (index, (&level, &(left, right))) in levels.iter().zip(bounds).enumerate() {
+        match runs.last_mut() {
+            Some(run) if run.level == level => {
+                run.end = index + 1;
+                run.left = run.left.min(left);
+                run.right = run.right.max(right);
+            }
+            _ => runs.push(Run {
+                start: index,
+                end: index + 1,
+                level,
+                left,
+                right,
+            }),
+        }
+    }
+    runs.sort_by(|a, b| a.left.total_cmp(&b.left));
+    let mut run_of = vec![0; levels.len()];
+    for (visual, run) in runs.iter().enumerate() {
+        run_of[run.start..run.end].fill(visual);
+    }
+    (runs, run_of)
+}
+
+/// The run next to `run` on its right, or left.
+fn beside(runs: &[Run], run: usize, right: bool) -> Option<&Run> {
+    if right {
+        runs.get(run + 1)
+    } else {
+        run.checked_sub(1).map(|left| &runs[left])
+    }
+}
+
+/// The farthest run from `run` to the right, or left, past runs that pass
+/// `keep`.
+fn farthest(runs: &[Run], mut run: usize, right: bool, keep: impl Fn(&Run) -> bool) -> usize {
+    while beside(runs, run, right).is_some_and(&keep) {
+        run = if right { run + 1 } else { run - 1 };
+    }
+    run
 }
 
 /// Caret movements, as the arrow, Home and End keys make them.
@@ -371,8 +492,12 @@ pub enum Motion {
     Right,
     WordLeft,
     WordRight,
+    /// The value's start, where the Up arrow goes in a single line.
     Start,
     End,
+    /// The line's visual start, as Home goes.
+    LineStart,
+    LineEnd,
 }
 
 /// The selection and scroll of one text input. The selection runs from
@@ -417,6 +542,8 @@ impl Editor {
             Motion::WordRight => text.next_word_end(self.head),
             Motion::Start => 0,
             Motion::End => text.len(),
+            Motion::LineStart => text.line_start(),
+            Motion::LineEnd => text.line_end(),
         };
         self.place(offset, extend);
     }
@@ -704,17 +831,53 @@ mod tests {
     }
 
     #[test]
-    fn the_caret_stays_beside_left_to_right_text_where_the_direction_changes() {
-        // "ab" then "אב" displayed reversed: a, b, ב, א.
-        let bounds = [(0.0, 8.0), (8.0, 16.0), (24.0, 32.0), (16.0, 24.0)];
-        let text = "ab\u{5D0}\u{5D1}";
-        assert_eq!(caret_x(text, &bounds, 2), 16.0);
-        assert_eq!(caret_x(text, &bounds, 3), 24.0);
-        // "אב" then "ab": ב, א, a, b.
-        let bounds = [(8.0, 16.0), (0.0, 8.0), (16.0, 24.0), (24.0, 32.0)];
-        let text = "\u{5D0}\u{5D1}ab";
-        assert_eq!(caret_x(text, &bounds, 2), 16.0);
-        assert_eq!(caret_x(text, &bounds, 4), 32.0);
-        assert_eq!(caret_x("", &[], 0), 0.0);
+    fn places_the_caret_where_chrome_does_in_mixed_directions() {
+        // How many 8px characters lie left of Chrome's caret at each offset.
+        for (value, edges) in [
+            ("Ana \u{628} 3 c", [0, 1, 2, 3, 4, 6, 4, 7, 8, 9].as_slice()),
+            (
+                "\u{645}\u{62D}\u{645}\u{62F} 2 \u{639}\u{644}\u{64A}",
+                &[0, 9, 8, 7, 6, 4, 5, 3, 2, 1, 10],
+            ),
+            ("\u{5D0}\u{5D1} 12", &[0, 4, 3, 0, 1, 5]),
+            (
+                "Ada \u{5E9}\u{5DC}\u{5D5}\u{5DD} B",
+                &[0, 1, 2, 3, 4, 7, 6, 5, 8, 9, 10],
+            ),
+            // Inside a cluster, after it: on its left going right to left.
+            ("a\u{5E9}\u{301}\u{5DC}", &[0, 1, 2, 2, 4]),
+            ("e\u{301}x", &[0, 2, 2, 3]),
+            ("", &[0]),
+        ] {
+            let text = name(value);
+            let carets: Vec<f64> = (0..=text.len())
+                .map(|offset| text.caret_x(offset))
+                .collect();
+            let expected: Vec<f64> = edges.iter().map(|&edge| f64::from(edge) * 8.0).collect();
+            assert_eq!(carets, expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_line_ends_as_chrome_does() {
+        for (value, ends) in [
+            ("\u{5D0}\u{5D1} 12", (3, 5)),
+            ("\u{5D0}\u{5D1} 1 \u{5D2} 2", (7, 8)),
+            ("\u{628} \u{663}", (2, 3)),
+            ("\u{663} \u{628}", (0, 1)),
+            ("ab \u{663} \u{628}", (0, 4)),
+            ("\u{5E9}\u{5DC}\u{5D5}\u{5DD}", (0, 4)),
+            ("", (0, 0)),
+        ] {
+            let text = name(value);
+            let mut caret = Editor::default();
+            caret.go(&text, Motion::LineStart, false);
+            let home = caret.head;
+            caret.go(&text, Motion::LineEnd, false);
+            assert_eq!((home, caret.head), ends, "{value:?}");
+        }
+        // A password is masks, going left to right.
+        let text = InputText::new(Field::Password, "\u{5D0}\u{5D1} 12", &FixedMeasure);
+        assert_eq!((text.line_start(), text.line_end()), (0, 5));
     }
 }

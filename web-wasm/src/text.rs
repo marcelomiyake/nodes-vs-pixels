@@ -83,6 +83,24 @@ pub fn char_bounds(text: &str, style: TextStyle, measure: &impl Measure) -> Vec<
     bounds.into_iter().flat_map(|(_, run)| run).collect()
 }
 
+/// The bidirectional level of each character of `text`, laid out as
+/// [`char_bounds`] lays it out: even levels run left to right, odd ones
+/// right to left.
+#[must_use]
+pub fn levels(text: &str) -> Vec<u8> {
+    let info = BidiInfo::new(text, Some(Level::ltr()));
+    let mut levels = info.levels.clone();
+    // Rule L1 puts tabs and the trailing spaces of a line at the level of
+    // its paragraph.
+    for paragraph in &info.paragraphs {
+        let line = paragraph.range.clone();
+        levels[line.clone()].copy_from_slice(&info.reordered_levels(paragraph, line.clone())[line]);
+    }
+    text.char_indices()
+        .map(|(index, _)| levels[index].number())
+        .collect()
+}
+
 /// What a shaper draws a mark on when it has no letter to attach to.
 const DOTTED_CIRCLE: char = '\u{25CC}';
 
@@ -846,6 +864,15 @@ mod tests {
             min_content_width("a\u{a0}", text::SMALL, &FixedMeasure),
             14.0
         );
+    }
+
+    #[test]
+    fn levels_put_tabs_at_the_paragraph_level() {
+        assert_eq!(levels("a אב"), [0, 0, 1, 1]);
+        // Between right-to-left letters, a tab and the spaces before it go
+        // back to the left-to-right paragraph's level.
+        assert_eq!(levels("אב \tגד"), [1, 1, 0, 0, 1, 1]);
+        assert_eq!(levels("אב גד"), [1, 1, 1, 1, 1]);
     }
 
     #[test]
