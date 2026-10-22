@@ -9,6 +9,7 @@ use form_core::Field;
 use icu_properties::CodePointMapData;
 use icu_properties::props::{GeneralCategory, GeneralCategoryGroup};
 
+use crate::backspace;
 use crate::copy;
 use crate::layout::{BORDER, Rect};
 use crate::text::Measure;
@@ -355,6 +356,12 @@ impl InputText {
         0
     }
 
+    /// Where Backspace deletes back to from `offset`.
+    fn backspace_from(&self, offset: usize) -> usize {
+        let before = &self.value[..self.byte(offset)];
+        offset - backspace::length(before.chars().rev())
+    }
+
     fn byte(&self, offset: usize) -> usize {
         self.value
             .char_indices()
@@ -571,9 +578,7 @@ impl Editor {
         let mut range = self.range();
         if range.is_empty() {
             let to = match (forward, word) {
-                // Backspace deletes a character, such as an accent typed after
-                // its letter.
-                (false, false) if self.head > 0 => self.head - 1,
+                (false, false) if self.head > 0 => text.backspace_from(self.head),
                 (false, false) => 0,
                 (false, true) => text.previous_word_start(self.head),
                 (true, false) => text.next_cluster(self.head),
@@ -773,10 +778,11 @@ mod tests {
             caret.delete(&text, true, false).as_deref(),
             Some("ax 👍\u{1F3FD}")
         );
+        // Backspace takes an emoji sequence whole.
         let mut caret = editor(7, 7);
         assert_eq!(
             caret.delete(&text, false, false).as_deref(),
-            Some("ae\u{301}x 👍")
+            Some("ae\u{301}x ")
         );
         let mut caret = editor(7, 7);
         assert_eq!(

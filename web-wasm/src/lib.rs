@@ -3,6 +3,7 @@
 //! focus, typing, autofill and the accessibility tree.
 
 pub mod app;
+pub mod backspace;
 pub mod editing;
 pub mod form;
 pub mod grpc_web;
