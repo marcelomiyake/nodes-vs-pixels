@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["backend", "crates/form-core"]
+members = ["backend", "crates/form-core", "web-wasm"]
 
 [workspace.package]
 edition = "2024"
@@ -23,3 +23,6 @@ pedantic = { level = "deny", priority = -1 }
 [profile.release]
 lto = true
 codegen-units = 1
+
+[profile.release.package.web-wasm]
+opt-level = "z"

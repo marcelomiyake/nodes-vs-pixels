@@ -1,0 +1,53 @@
+[package]
+name = "web-wasm"
+description = "The sign-up form painted on a canvas by Rust compiled to WebAssembly"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+form-core.workspace = true
+prost = { version = "0.14.4", default-features = false, features = ["derive", "std"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.106"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+web-sys = { version = "0.3.106", features = [
+  "CanvasRenderingContext2d",
+  "CssStyleDeclaration",
+  "Document",
+  "DomRect",
+  "Element",
+  "Event",
+  "EventTarget",
+  "FocusEvent",
+  "FontFaceSet",
+  "Headers",
+  "HtmlButtonElement",
+  "HtmlCanvasElement",
+  "HtmlElement",
+  "HtmlFormElement",
+  "HtmlInputElement",
+  "HtmlLabelElement",
+  "Path2d",
+  "Request",
+  "RequestInit",
+  "ResizeObserver",
+  "Response",
+  "TextMetrics",
+  "Window",
+] }
+
+[build-dependencies]
+prost-build = "0.14.4"
+protox = "0.10.0"
+serde_json.workspace = true
+
+[lints]
+workspace = true

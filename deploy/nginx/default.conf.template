@@ -19,8 +19,9 @@ server {
         try_files $uri $uri/ =404;
     }
 
-    # Content-hashed build output and the versioned font never change in place.
-    location ~ ^/(assets|pkg|fonts)/ {
+    # Only Vite's content-hashed output is immutable; everything else (including the
+    # fixed-name WebAssembly bundle and font) is revalidated on every load.
+    location /assets/ {
         add_header X-Content-Type-Options nosniff always;
         add_header Cache-Control "public, max-age=31536000, immutable";
     }
