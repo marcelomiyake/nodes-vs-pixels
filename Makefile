@@ -4,7 +4,7 @@ CONTEXT := kind-$(CLUSTER)
 TAG := 0.1.0
 APPS := backend web-react web-wasm
 
-.PHONY: build test images kind-up deploy kind-down
+.PHONY: build test coverage sonar images kind-up deploy kind-down
 
 build:
 	cargo build --release --locked -p backend
@@ -19,6 +19,18 @@ test:
 	pnpm --filter web-react lint
 	pnpm --filter web-react typecheck
 	pnpm --filter web-react test
+
+# LCOV reports for SonarQube Cloud.
+coverage:
+	mkdir -p target/coverage
+	cargo llvm-cov --locked -p backend -p form-core --lcov --output-path target/coverage/backend.lcov
+	cargo llvm-cov --locked -p web-wasm --lcov --output-path target/coverage/web-wasm.lcov
+	pnpm --filter seo test
+	pnpm --filter web-react test
+
+# Analyzes each project on SonarQube Cloud; needs SONAR_TOKEN.
+sonar: coverage
+	$(foreach app,$(APPS),sonar-scanner -Dproject.settings=$(app)/sonar-project.properties &&) true
 
 images:
 	$(foreach app,$(APPS),docker build -f $(app)/Dockerfile -t $(CLUSTER)/$(app):$(TAG) . &&) true
@@ -36,3 +48,4 @@ deploy: images kind-up
 
 kind-down:
 	kind delete cluster --name $(CLUSTER)
+
