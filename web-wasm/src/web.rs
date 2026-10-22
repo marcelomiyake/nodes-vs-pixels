@@ -485,8 +485,30 @@ struct CanvasPainter<'a> {
     ratio: f64,
 }
 
+impl CanvasPainter<'_> {
+    /// `rect` on whole device pixels, at least one wide and high unless it
+    /// is empty, as Chrome paints boxes, carets and highlights and clips.
+    fn snap(&self, rect: Rect) -> Rect {
+        let snap = |value: f64| (value * self.ratio).round() / self.ratio;
+        let size = |start: f64, size: f64| {
+            if size > 0.0 {
+                (snap(start + size) - snap(start)).max(1.0 / self.ratio)
+            } else {
+                0.0
+            }
+        };
+        Rect::new(
+            snap(rect.x),
+            snap(rect.y),
+            size(rect.x, rect.width),
+            size(rect.y, rect.height),
+        )
+    }
+}
+
 impl Painter for CanvasPainter<'_> {
     fn fill_rect(&mut self, rect: Rect, radius: f64, color: &str, shadow: Option<Shadow>) {
+        let rect = self.snap(rect);
         let context = self.context;
         context.save();
         if let Some(shadow) = shadow {
@@ -531,6 +553,7 @@ impl Painter for CanvasPainter<'_> {
     }
 
     fn clip(&mut self, rect: Rect) {
+        let rect = self.snap(rect);
         self.context.save();
         self.context.begin_path();
         self.context.rect(rect.x, rect.y, rect.width, rect.height);
