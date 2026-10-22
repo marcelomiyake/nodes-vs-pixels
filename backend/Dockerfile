@@ -5,6 +5,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY proto proto
 COPY crates crates
 COPY backend backend
+# web-wasm is a workspace member, so Cargo needs its manifest and sources.
+COPY web-wasm web-wasm
 RUN cargo build --release --locked -p backend
 
 FROM gcr.io/distroless/cc-debian13:nonroot
