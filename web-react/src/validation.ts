@@ -33,15 +33,22 @@ const EMAIL_MAX = 254;
 const PASSWORD_MIN = 12;
 const PASSWORD_MAX = 128;
 
-const EDGE_WHITESPACE = /^\p{White_Space}+|\p{White_Space}+$/gu;
 const WHITESPACE = /\p{White_Space}/u;
 const NAME_CHARACTERS = /^[\p{Alphabetic} '’-]+$/u;
 const UPPERCASE = /\p{Uppercase}/u;
 const LOWERCASE = /\p{Lowercase}/u;
-const DIGIT = /[0-9]/;
+const DIGIT = /\d/;
 const SYMBOL = /[^\p{Alphabetic}\p{N}\p{White_Space}]/u;
 
-const trim = (value: string) => value.replaceAll(EDGE_WHITESPACE, '');
+/** Trims Unicode White_Space like Rust's `str::trim`, which `String.prototype.trim` does not match. */
+function trim(value: string): string {
+  let start = 0;
+  let end = value.length;
+  // Every White_Space character is a single UTF-16 code unit.
+  while (start < end && WHITESPACE.test(value.charAt(start))) start += 1;
+  while (end > start && WHITESPACE.test(value.charAt(end - 1))) end -= 1;
+  return value.slice(start, end);
+}
 
 /** Length in Unicode code points, matching Rust's `chars().count()`. */
 const codePoints = (value: string) => Array.from(value).length;
