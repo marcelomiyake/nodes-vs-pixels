@@ -1,0 +1,11 @@
+{
+  "policy": "Use a Sonar project for each real component; retain existing aggregate history.",
+  "projects": [
+    {
+      "component": "form-core",
+      "directory": "crates/form-core",
+      "key": "marcelomiyake_nodes-vs-pixels_form-core",
+      "kind": "rust-core"
+    }
+  ]
+}
