@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/form-core"]
+members = ["backend", "crates/form-core"]
 
 [workspace.package]
 edition = "2024"

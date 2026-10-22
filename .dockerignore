@@ -1,0 +1,11 @@
+**/target
+**/node_modules
+**/dist
+**/pkg
+**/coverage
+**/test-results
+**/playwright-report
+.git
+.scannerwork
+lighthouse
+docs
