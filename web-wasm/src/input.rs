@@ -55,6 +55,15 @@ pub enum Event {
     },
     /// The pointer moved to a point of the page, or left it.
     Pointer(Option<(f64, f64)>),
+    /// The mouse wheel turned, or a trackpad swiped, `dx` and `dy` pixels
+    /// over a point of the page.
+    Wheel {
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+        shift: bool,
+    },
     Copy,
     Cut,
     Paste(String),
@@ -274,6 +283,17 @@ impl App {
                 let dragged = self.dragged(page, measure);
                 self.drag(dragged.map(|(field, _, editor)| (field, editor)))
             }
+            Event::Wheel {
+                x,
+                y,
+                dx,
+                dy,
+                shift,
+            } => {
+                // Chrome turns a vertical wheel sideways with Shift.
+                let dx = if shift && dx == 0.0 { dy } else { dx };
+                self.wheel((x, y), dx, page, measure)
+            }
             Event::Copy => self.copy(false, page, measure),
             Event::Cut => self.copy(true, page, measure),
             Event::Paste(text) => match self.editing() {
@@ -319,6 +339,16 @@ impl App {
             .map(|field| self.editor(field))
             .unwrap_or_default();
         let range = editor.range();
+        // Every input keeps its own scroll, which the focused one only shows
+        // while the canvas has focus.
+        let scroll_left = TEXT_FIELDS.map(|field| {
+            let hidden = self.focus == Some(Control::Field(field)) && self.editing() != Some(field);
+            if hidden {
+                0.0
+            } else {
+                self.editor(field).scroll
+            }
+        });
         let button = match &page.content {
             Content::Form(form) => Some(form.button),
             Content::Success(_) => None,
@@ -332,7 +362,7 @@ impl App {
                     .zip(button)
                     .is_some_and(|(at, rect)| inside(rect, at)),
             caret_visible: self.caret_visible,
-            scroll_left: editor.scroll,
+            scroll_left,
             selection: (range.start, range.end),
         }
     }
@@ -447,12 +477,11 @@ impl App {
         if self.canvas == Canvas::Outside {
             self.canvas = Canvas::Focused;
         }
-        // Tabbing into a text input selects its value.
+        // Tabbing into a text input selects its value, and keeps its scroll.
         if let Control::Field(field) = control {
             let text = InputText::new(field, self.state.text(field), measure);
             let editor = self.editors.entry(field).or_default();
             editor.select(0..text.len());
-            editor.scroll = 0.0;
         }
         true
     }
@@ -788,6 +817,24 @@ impl App {
             editor.place(text.offset_at(at), true);
         }
         Some((field, text, editor))
+    }
+
+    /// Scrolls the text input under the pointer sideways by `dx`, focused or
+    /// not, as Chrome scrolls one under a wheel or a trackpad; then the page
+    /// must not scroll too.
+    fn wheel(&mut self, at: (f64, f64), dx: f64, page: &Layout, measure: &impl Measure) -> Outcome {
+        let Some(Target::Input(field)) = hit(page, at, measure) else {
+            return Outcome::default();
+        };
+        let text = InputText::new(field, self.state.text(field), measure);
+        let editor = self.editors.entry(field).or_default();
+        let before = editor.scroll;
+        editor.scroll_by(&text, content_width(page, field), dx);
+        let moved = editor.scroll - before;
+        Outcome {
+            handled: moved != 0.0,
+            ..Outcome::default()
+        }
     }
 
     /// Puts a dragged selection in place. Only the autoscroll scrolls the
@@ -1706,6 +1753,46 @@ mod tests {
         let terms = Some(Target::Label(Field::AcceptTerms));
         assert_eq!(hit(&page, (end - 1.0, label.rect.y + 1.0), &Narrow), terms);
         assert_eq!(hit(&page, (end + 1.0, label.rect.y + 1.0), &Narrow), None);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_input_under_it_sideways() {
+        let mut app = focused();
+        let long = "a.very.long.address.that.overflows@example.com";
+        app.state.set_text(Field::Email, long);
+        let email = center(form(&app).fields[1].input);
+        let wheel = |app: &mut App, dx: f64, dy: f64, shift: bool| {
+            let (x, y) = email;
+            let handled = send(
+                app,
+                Event::Wheel {
+                    x,
+                    y,
+                    dx,
+                    dy,
+                    shift,
+                },
+            )
+            .handled;
+            (handled, app.interaction(&page(app)).scroll_left[1])
+        };
+        // Unfocused, and as far as its end goes.
+        let end = wheel(&mut app, 1000.0, 0.0, false);
+        assert!(end.0 && end.1 > 0.0);
+        assert_eq!(wheel(&mut app, -10.0, 0.0, false), (true, end.1 - 10.0));
+        // Shift turns the wheel sideways; down alone scrolls the page.
+        assert_eq!(wheel(&mut app, 0.0, -1000.0, true), (true, 0.0));
+        assert_eq!(wheel(&mut app, 0.0, 40.0, false), (false, 0.0));
+        assert_eq!(wheel(&mut app, -10.0, 0.0, false), (false, 0.0));
+        // Focus keeps the scroll, from a click or from Tab.
+        wheel(&mut app, 20.0, 0.0, false);
+        click(&mut app, email);
+        assert_eq!(focus(&app), Some(Control::Field(Field::Email)));
+        assert_eq!(app.interaction(&page(&app)).scroll_left[1], 20.0);
+        key(&mut app, "Tab");
+        wheel(&mut app, 20.0, 0.0, false);
+        press(&mut app, "Tab", |key| key.shift = true);
+        assert_eq!(app.interaction(&page(&app)).scroll_left[1], 20.0);
     }
 
     #[test]

@@ -5,7 +5,9 @@ use form_core::Field;
 
 use crate::editing::{self, InputText, TOUCHING, content_box};
 use crate::form::FormState;
-use crate::layout::{Align, BORDER, Content, FormLayout, Layout, Rect, SuccessLayout, TextBlock};
+use crate::layout::{
+    Align, BORDER, Content, FormLayout, Layout, Rect, SuccessLayout, TEXT_FIELDS, TextBlock,
+};
 use crate::style::{Shadow, TextStyle};
 use crate::text::{Measure, baseline};
 use crate::tokens::{color, radius, shadow, spacing, text};
@@ -51,8 +53,9 @@ pub struct Interaction {
     pub hovered: bool,
     /// Whether the blinking caret is in its visible phase.
     pub caret_visible: bool,
-    /// The focused input's horizontal text scroll (`scrollLeft`).
-    pub scroll_left: f64,
+    /// The text inputs' horizontal text scroll (`scrollLeft`), in
+    /// [`TEXT_FIELDS`] order.
+    pub scroll_left: [f64; TEXT_FIELDS.len()],
     /// The focused input's selection, in characters.
     pub selection: (usize, usize),
 }
@@ -93,7 +96,7 @@ fn paint_form(
     paint_text(&form.title, color::INK, measure, painter);
     paint_text(&form.subtitle, color::MUTED, measure, painter);
 
-    for field in &form.fields {
+    for (field, &scroll) in form.fields.iter().zip(&ui.scroll_left) {
         paint_text(&field.label, color::INK_SOFT, measure, painter);
         let focused = ui.focus == Some(Control::Field(field.field));
         let invalid = state.error(field.field).is_some();
@@ -116,7 +119,8 @@ fn paint_form(
             None,
         );
         let editor = focused.then_some(ui);
-        paint_input(field.field, field.input, state, editor, measure, painter);
+        let input = (field.field, field.input, scroll);
+        paint_input(input, state, editor, measure, painter);
         if let Some(message) = &field.message {
             let tone = if invalid {
                 color::DANGER
@@ -193,8 +197,7 @@ pub fn caret_line(input: Rect, measure: &impl Measure) -> Rect {
 /// The value or placeholder of a text input, with the selection and caret
 /// when it has focus. Text is clipped to the content box and scrolls with it.
 fn paint_input(
-    field: Field,
-    input: Rect,
+    (field, input, scroll): (Field, Rect, f64),
     state: &FormState,
     editor: Option<&Interaction>,
     measure: &impl Measure,
@@ -210,7 +213,6 @@ fn paint_input(
         || editing::shown(field, value, measure),
         |text| text.shown.clone(),
     );
-    let scroll = editor.map_or(0.0, |ui| ui.scroll_left);
     let origin = content.x - scroll;
 
     painter.clip(content);
@@ -524,7 +526,7 @@ mod tests {
         let ui = Interaction {
             focus: Some(Control::Field(Field::FullName)),
             caret_visible: true,
-            scroll_left: 7.0,
+            scroll_left: [7.0, 0.0, 0.0, 0.0],
             selection: (2, 2),
             ..Interaction::default()
         };
@@ -552,6 +554,22 @@ mod tests {
     }
 
     #[test]
+    fn an_input_out_of_focus_keeps_its_scroll() {
+        let mut state = FormState::default();
+        state.set_text(Field::Email, "ada@example.com");
+        let ui = Interaction {
+            scroll_left: [0.0, 9.0, 0.0, 0.0],
+            ..Interaction::default()
+        };
+        let (page, painter) = paint_with(&state, &ui);
+        let input = form_of(&page).fields[1].input;
+        let Some(Op::Text { x, .. }) = painter.text("ada@example.com") else {
+            panic!("expected the value");
+        };
+        assert_eq!(*x, input.x + 13.0 - 9.0);
+    }
+
+    #[test]
     fn the_caret_stays_inside_a_scrolled_input() {
         let mut state = FormState::default();
         state.set_text(Field::FullName, &"a".repeat(60));
@@ -562,7 +580,7 @@ mod tests {
         let ui = Interaction {
             focus: Some(Control::Field(Field::FullName)),
             caret_visible: true,
-            scroll_left: 480.0 - (input.width - 26.0),
+            scroll_left: [480.0 - (input.width - 26.0), 0.0, 0.0, 0.0],
             selection: (60, 60),
             ..Interaction::default()
         };
@@ -572,7 +590,7 @@ mod tests {
 
         // Scrolled back to the start, the caret is out of view and clipped.
         let start = Interaction {
-            scroll_left: 0.0,
+            scroll_left: [0.0; 4],
             ..ui
         };
         let (_, painter) = paint_with(&state, &start);

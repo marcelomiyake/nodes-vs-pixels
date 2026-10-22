@@ -13,7 +13,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
     CanvasRenderingContext2d, ClipboardEvent, Document, EventTarget, HtmlCanvasElement,
-    KeyboardEvent, MouseEvent, Path2d, Request, RequestInit, Response, Window,
+    KeyboardEvent, MouseEvent, Path2d, Request, RequestInit, Response, WheelEvent, Window,
 };
 
 use crate::form::Status;
@@ -457,6 +457,18 @@ fn listen(shared: &Shared) -> Result<(), JsValue> {
     })?;
     on(&canvas, "mouseleave", shared, |_: &MouseEvent| {
         Some(Event::Pointer(None))
+    })?;
+    // Ctrl with the wheel zooms the page. Chrome reports pixels.
+    let target = canvas.clone();
+    on(&canvas, "wheel", shared, move |event: &WheelEvent| {
+        let (x, y) = point(&target, event);
+        (!event.ctrl_key()).then(|| Event::Wheel {
+            x,
+            y,
+            dx: event.delta_x(),
+            dy: event.delta_y(),
+            shift: event.shift_key(),
+        })
     })?;
     on(&canvas, "copy", shared, |_: &ClipboardEvent| {
         Some(Event::Copy)
