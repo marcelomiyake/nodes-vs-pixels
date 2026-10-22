@@ -69,6 +69,6 @@ mod tests {
         let page = include_str!("../static/index.html");
         assert!(page.contains(&format!("background:{}", tokens::color::PAGE)));
         assert!(page.contains(&format!("/fonts/{}", tokens::FONT_FILE)));
-        assert!(page.contains("<!-- seo -->"));
+        assert!(page.contains("<title>"));
     }
 }

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Injects the shared SEO head block into a built index.html and writes robots.txt.
 // Both frontends call this same step, so their metadata cannot drift apart.
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-export const MARKER = '<!-- seo -->';
+// The placeholder title of each index.html, which the head block replaces.
+export const MARKER = /<title>[^<]*<\/title>/g;
 
 const ESCAPES = { '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' };
 
@@ -43,11 +44,26 @@ export function renderHead(site, url) {
 }
 
 export function injectSeo(html, head) {
-  const at = html.indexOf(MARKER);
-  if (at === -1 || html.indexOf(MARKER, at + 1) !== -1) {
-    throw new Error(`index.html must contain the ${MARKER} marker exactly once`);
+  // The canonical link only comes from the head block: a page that has one
+  // was processed already, and a second block would duplicate every tag.
+  if (html.includes('rel="canonical"')) {
+    throw new Error('index.html already has SEO metadata');
+  }
+  if (html.match(MARKER)?.length !== 1) {
+    throw new Error('index.html must contain exactly one <title> to replace');
   }
   return html.replace(MARKER, () => head);
+}
+
+// Resolves the build output directory, which must lie inside the working
+// directory, so the tool cannot be pointed at files elsewhere.
+export function outputDir(dir) {
+  const resolved = realpathSync(dir);
+  const base = realpathSync(process.cwd());
+  if (resolved !== base && !resolved.startsWith(base + sep)) {
+    throw new Error(`${dir} is outside the working directory`);
+  }
+  return resolved;
 }
 
 export const ROBOTS_TXT = 'User-agent: *\nAllow: /\n';
@@ -62,9 +78,10 @@ export function run(argv, env = process.env) {
   }
   const site = JSON.parse(readFileSync(new URL('site.json', import.meta.url), 'utf8'));
   const url = resolveUrl(site, values.app, env.SITE_URL);
-  const indexPath = join(values.dir, 'index.html');
+  const dir = outputDir(values.dir);
+  const indexPath = join(dir, 'index.html');
   writeFileSync(indexPath, injectSeo(readFileSync(indexPath, 'utf8'), renderHead(site, url)));
-  writeFileSync(join(values.dir, 'robots.txt'), ROBOTS_TXT);
+  writeFileSync(join(dir, 'robots.txt'), ROBOTS_TXT);
   return url;
 }
 

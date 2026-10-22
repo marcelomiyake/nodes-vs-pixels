@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
-  MARKER,
   ROBOTS_TXT,
   escapeHtml,
   injectSeo,
@@ -63,32 +62,48 @@ describe('renderHead', () => {
 });
 
 describe('injectSeo', () => {
-  it('replaces the marker with the head block', () => {
-    assert.equal(injectSeo(`<head>${MARKER}</head>`, '<title>$&</title>'), '<head><title>$&</title></head>');
+  it('replaces the placeholder title with the head block', () => {
+    assert.equal(injectSeo('<head><title>App</title></head>', '<title>$&</title>'), '<head><title>$&</title></head>');
   });
 
-  it('requires exactly one marker', () => {
-    assert.throws(() => injectSeo('<head></head>', ''), /exactly once/);
-    assert.throws(() => injectSeo(`${MARKER}${MARKER}`, ''), /exactly once/);
+  it('requires exactly one title', () => {
+    assert.throws(() => injectSeo('<head></head>', ''), /exactly one/);
+    assert.throws(() => injectSeo('<title>A</title><title>B</title>', ''), /exactly one/);
+  });
+
+  it('refuses a page that already has the head block', () => {
+    const head = renderHead(site, 'http://localhost:8081/');
+    assert.throws(() => injectSeo(injectSeo('<title>App</title>', head), head), /already has SEO metadata/);
   });
 });
 
 describe('run', () => {
+  const cwd = process.cwd();
   let dir;
 
+  // The output directory must lie inside the working directory.
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'seo-'));
-    writeFileSync(join(dir, 'index.html'), `<head>\n    ${MARKER}\n</head>`);
+    writeFileSync(join(dir, 'index.html'), '<head>\n    <title>App</title>\n</head>');
+    process.chdir(dir);
   });
 
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => {
+    process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it('injects metadata and writes robots.txt', () => {
     assert.equal(run(['--app', 'web-react', '--dir', dir], {}), 'http://localhost:8081/');
     const html = readFileSync(join(dir, 'index.html'), 'utf8');
     assert.match(html, /<title>Create your account · Nodes vs Pixels<\/title>/);
-    assert.doesNotMatch(html, new RegExp(MARKER));
+    assert.doesNotMatch(html, /<title>App/);
     assert.equal(readFileSync(join(dir, 'robots.txt'), 'utf8'), ROBOTS_TXT);
+  });
+
+  it('refuses to run twice on the same output', () => {
+    run(['--app', 'web-react', '--dir', dir], {});
+    assert.throws(() => run(['--app', 'web-react', '--dir', dir], {}), /already has SEO metadata/);
   });
 
   it('honours SITE_URL', () => {
@@ -99,9 +114,14 @@ describe('run', () => {
     assert.throws(() => run(['--app', 'web-react'], {}), /Usage/);
   });
 
+  it('refuses directories outside the working directory', () => {
+    assert.throws(() => run(['--app', 'web-react', '--dir', '..'], {}), /outside the working directory/);
+  });
+
   it('works as a command-line tool', () => {
     const script = fileURLToPath(new URL('inject.mjs', import.meta.url));
     const result = spawnSync(process.execPath, [script, '--app', 'web-wasm', '--dir', dir], {
+      cwd: dir,
       encoding: 'utf8',
       env: { ...process.env, SITE_URL: '' },
     });
