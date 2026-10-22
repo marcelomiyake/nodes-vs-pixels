@@ -2,7 +2,6 @@
 //! crate draws everything visible and handles the keys, mouse buttons and
 //! clipboard itself.
 
-pub mod app;
 pub mod backspace;
 pub mod editing;
 pub mod form;
@@ -10,7 +9,6 @@ pub mod grpc_web;
 pub mod history;
 pub mod input;
 pub mod layout;
-pub mod overlay;
 pub mod scene;
 pub mod style;
 pub mod text;

@@ -57,18 +57,6 @@ pub struct Interaction {
     pub selection: (usize, usize),
 }
 
-/// Converts a DOM selection offset (UTF-16 code units) to characters.
-#[must_use]
-pub fn char_offset(text: &str, utf16: usize) -> usize {
-    let mut units = 0;
-    text.chars()
-        .take_while(|c| {
-            units += c.len_utf16();
-            units <= utf16
-        })
-        .count()
-}
-
 /// Paints the whole document.
 pub fn paint(
     layout: &Layout,
@@ -760,14 +748,5 @@ mod tests {
             success.title.rect.x + (success.title.rect.width - title_width) / 2.0
         );
         assert_eq!(color_of(&painter, &success.body.lines[0]), color::MUTED);
-    }
-
-    #[test]
-    fn converts_utf16_offsets_to_characters() {
-        assert_eq!(char_offset("a😀b", 0), 0);
-        assert_eq!(char_offset("a😀b", 1), 1);
-        assert_eq!(char_offset("a😀b", 3), 2);
-        assert_eq!(char_offset("a😀b", 4), 3);
-        assert_eq!(char_offset("a😀b", 9), 3);
     }
 }
