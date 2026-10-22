@@ -35,7 +35,9 @@ export default function SignUpForm({ form }: Readonly<SignUpFormProps>) {
         {copy.title}
       </h1>
       <p className="mt-title-gap text-small text-muted">{copy.subtitle}</p>
+      {/* POST keeps credentials out of the URL if someone submits before hydration. */}
       <form
+        method="post"
         noValidate
         aria-labelledby="title"
         aria-busy={submitting}
