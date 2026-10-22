@@ -27,11 +27,12 @@ pub trait Measure {
     fn width(&self, text: &str, style: TextStyle) -> f64;
     fn metrics(&self, style: TextStyle) -> FontMetrics;
 
-    /// Splits a run of a script written without spaces (Thai, Lao, Khmer,
-    /// Myanmar) into words; the browser breaks lines between them using its
-    /// dictionaries. The pieces must concatenate back to `run`.
-    fn dictionary_words(&self, run: &str) -> Vec<String> {
-        vec![run.to_owned()]
+    /// Splits `text` into words and the pieces between them, as the
+    /// browser's word segmenter does. In scripts written without spaces
+    /// (Thai, Lao, Khmer, Myanmar) it finds words with dictionaries, and
+    /// lines break between them. The pieces must concatenate back to `text`.
+    fn words(&self, text: &str) -> Vec<String> {
+        vec![text.to_owned()]
     }
 
     /// Splits `text` into grapheme clusters, which a password input masks
@@ -460,7 +461,7 @@ fn dictionary_breaks(text: &str, measure: &impl Measure) -> Vec<usize> {
         while let Some((index, next)) = chars.next_if(|&(_, next)| is_complex(next)) {
             run_end = index + next.len_utf8();
         }
-        let words = measure.dictionary_words(&text[run_start..run_end]);
+        let words = measure.words(&text[run_start..run_end]);
         let mut offset = run_start;
         for word in words.iter().take(words.len().saturating_sub(1)) {
             offset += word.len();
@@ -653,13 +654,20 @@ const UNICODE_17: [(u32, u32, Change); 72] = [
 
 #[cfg(test)]
 pub mod testing {
-    use super::{FontMetrics, Measure};
+    use super::{FontMetrics, Measure, is_complex};
     use crate::style::TextStyle;
 
-    /// Every character is half the font size wide, spaceless scripts split
-    /// into three-character "words", and combining diacritics join the
-    /// character before them.
+    /// Every character is half the font size wide. Letters and digits make
+    /// words, three at a time in scripts written without spaces, and spaces
+    /// group, while any other character stands alone. Combining diacritics,
+    /// skin tones and joiners join the character before them.
     pub struct FixedMeasure;
+
+    fn joins(c: char) -> bool {
+        ('\u{300}'..='\u{36F}').contains(&c)
+            || ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+            || c == '\u{200D}'
+    }
 
     impl Measure for FixedMeasure {
         fn width(&self, text: &str, style: TextStyle) -> f64 {
@@ -675,16 +683,42 @@ pub mod testing {
             }
         }
 
-        fn dictionary_words(&self, run: &str) -> Vec<String> {
-            let chars: Vec<char> = run.chars().collect();
-            chars.chunks(3).map(|word| word.iter().collect()).collect()
+        fn words(&self, text: &str) -> Vec<String> {
+            let mut words: Vec<String> = Vec::new();
+            let mut last = None;
+            for c in text.chars() {
+                let kind = if is_complex(c) {
+                    0
+                } else if c.is_whitespace() {
+                    1
+                } else if c.is_alphanumeric() {
+                    2
+                } else {
+                    3
+                };
+                match words.last_mut() {
+                    Some(word) if joins(c) => word.push(c),
+                    Some(word)
+                        if last == Some(kind)
+                            && kind != 3
+                            && !(kind == 0 && word.chars().count() == 3) =>
+                    {
+                        word.push(c);
+                    }
+                    _ => {
+                        words.push(c.to_string());
+                        last = Some(kind);
+                    }
+                }
+            }
+            words
         }
 
         fn graphemes(&self, text: &str) -> Vec<String> {
             let mut graphemes: Vec<String> = Vec::new();
             for c in text.chars() {
                 match graphemes.last_mut() {
-                    Some(last) if ('\u{300}'..='\u{36F}').contains(&c) => last.push(c),
+                    Some(last) if joins(c) => last.push(c),
                     _ => graphemes.push(c.to_string()),
                 }
             }

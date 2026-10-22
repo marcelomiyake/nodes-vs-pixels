@@ -3,6 +3,7 @@
 
 use form_core::Field;
 
+use crate::editing::{self, InputText, TOUCHING, content_box};
 use crate::form::FormState;
 use crate::layout::{Align, BORDER, Content, FormLayout, Layout, Rect, SuccessLayout, TextBlock};
 use crate::style::{Shadow, TextStyle};
@@ -16,8 +17,6 @@ const CHECK_STROKE: f64 = 2.0;
 pub const SUCCESS_PATH: &str = "M5 12.5l4.5 4.5L19 7.5";
 const SUCCESS_SIZE: f64 = 24.0;
 const SUCCESS_STROKE: f64 = 2.5;
-/// How Chrome masks each character of a password.
-const MASK: char = '\u{2022}';
 /// Chrome's caret width.
 const CARET_WIDTH: f64 = 1.0;
 
@@ -191,13 +190,7 @@ fn paint_input(
     painter: &mut impl Painter,
 ) {
     let style = text::BODY;
-    let inset = BORDER + spacing::CONTROL_X;
-    let content = Rect::new(
-        input.x + inset,
-        input.y + BORDER,
-        input.width - 2.0 * inset,
-        input.height - 2.0 * BORDER,
-    );
+    let content = content_box(input);
     let line_top = input.y + (input.height - style.line_height) / 2.0;
     let metrics = measure.metrics(style);
     let text_baseline = baseline(line_top, style, metrics);
@@ -208,48 +201,20 @@ fn paint_input(
         0.0,
         metrics.ascent + metrics.descent,
     );
-    let copy = crate::copy::field(field.key());
     let value = state.text(field);
-    let masked = copy.is_some_and(|copy| copy.input_type == "password");
-    // Chrome masks a password one grapheme cluster at a time.
-    let graphemes = if masked {
-        measure.graphemes(value)
-    } else {
-        Vec::new()
-    };
-    let shown: String = if masked {
-        MASK.to_string().repeat(graphemes.len())
-    } else {
-        value.to_owned()
-    };
-    // Selection offsets count the value's characters, which a mask stands
-    // for a whole cluster of.
-    let shown_offset = |chars: usize| {
-        if !masked {
-            return chars;
-        }
-        let mut end = 0;
-        graphemes
-            .iter()
-            .take_while(|grapheme| {
-                end += grapheme.chars().count();
-                end <= chars
-            })
-            .count()
-    };
+    // Only the focused input needs to know where its characters are.
+    let text = editor.map(|_| InputText::new(field, value, measure));
+    let shown = text.as_ref().map_or_else(
+        || editing::shown(field, value, measure),
+        |text| text.shown.clone(),
+    );
     let scroll = editor.map_or(0.0, |ui| ui.scroll_left);
     let origin = content.x - scroll;
 
-    let bounds = if editor.is_some() {
-        measure.char_bounds(&shown, style)
-    } else {
-        Vec::new()
-    };
-
     painter.clip(content);
-    if let Some(ui) = editor {
-        let selected = shown_offset(ui.selection.0)..shown_offset(ui.selection.1);
-        for (left, right) in selection_spans(bounds.get(selected).unwrap_or_default()) {
+    if let Some((ui, text)) = editor.zip(text.as_ref()) {
+        let selected = text.shown_offset(ui.selection.0)..text.shown_offset(ui.selection.1);
+        for (left, right) in selection_spans(text.bounds.get(selected).unwrap_or_default()) {
             let highlight = Rect {
                 x: origin + left,
                 width: right - left,
@@ -259,18 +224,19 @@ fn paint_input(
         }
     }
     if shown.is_empty() {
-        let placeholder = copy.map_or("", |copy| copy.placeholder);
+        let placeholder = crate::copy::field(field.key()).map_or("", |copy| copy.placeholder);
         painter.fill_text(placeholder, content.x, text_baseline, style, color::SUBTLE);
     } else {
         painter.fill_text(&shown, origin, text_baseline, style, color::INK);
     }
-    if let Some(ui) = editor.filter(|ui| ui.caret_visible && ui.selection.0 == ui.selection.1) {
+    let caret = editor.filter(|ui| ui.caret_visible && ui.selection.0 == ui.selection.1);
+    if let Some((ui, text)) = caret.zip(text.as_ref()) {
         // Chrome scrolls by whole pixels, which can leave a caret at the
         // text's fractional end just past the content box; it keeps that
         // one inside, and hides one scrolled further out of view.
         let content_right = content.x + content.width;
         let last = content_right - CARET_WIDTH;
-        let x = origin + caret_x(&shown, &bounds, shown_offset(ui.selection.1));
+        let x = origin + text.caret_x(ui.selection.1);
         let caret = Rect {
             x: if x > last && x < content_right + 1.0 {
                 last
@@ -285,9 +251,6 @@ fn paint_input(
     painter.restore();
 }
 
-/// How far apart, in pixels, the edges of adjacent characters may be.
-const TOUCHING: f64 = 0.5;
-
 /// The highlight over the selected characters: their bounds, merged where
 /// they touch.
 fn selection_spans(selected: &[(f64, f64)]) -> Vec<(f64, f64)> {
@@ -301,44 +264,6 @@ fn selection_spans(selected: &[(f64, f64)]) -> Vec<(f64, f64)> {
         }
     }
     spans
-}
-
-/// Where Chrome draws the caret before character `offset`: between the
-/// characters on either side where they touch, and where the direction
-/// changes, beside the one that runs left to right like the line. It sits
-/// at the line's left edge before the first character and at its right edge
-/// after the last.
-fn caret_x(text: &str, bounds: &[(f64, f64)], offset: usize) -> f64 {
-    let Some(&(next_left, next_right)) = bounds.get(offset) else {
-        return bounds.iter().map(|&(_, right)| right).fold(0.0, f64::max);
-    };
-    let Some(&(before_left, before_right)) = offset.checked_sub(1).and_then(|i| bounds.get(i))
-    else {
-        return 0.0;
-    };
-    if (before_right - next_left).abs() <= TOUCHING {
-        before_right
-    } else if (before_left - next_right).abs() <= TOUCHING {
-        before_left
-    } else if text.chars().nth(offset - 1).is_some_and(is_rtl) {
-        // Leaving a right-to-left run.
-        next_left
-    } else {
-        // Entering one.
-        before_right
-    }
-}
-
-/// Characters of the scripts written right to left (bidirectional classes
-/// R and AL, with the marks of their blocks).
-fn is_rtl(c: char) -> bool {
-    matches!(c,
-        '\u{0590}'..='\u{08FF}'     // Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic
-        | '\u{FB1D}'..='\u{FDFF}'   // Hebrew and Arabic presentation forms
-        | '\u{FE70}'..='\u{FEFF}'   // Arabic presentation forms B
-        | '\u{10800}'..='\u{10FFF}' // Historic right-to-left scripts
-        | '\u{1E800}'..='\u{1EFFF}' // Mende Kikakui, Adlam
-    )
 }
 
 fn paint_success(success: &SuccessLayout, measure: &impl Measure, painter: &mut impl Painter) {
@@ -728,18 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn the_caret_stays_beside_left_to_right_text_where_the_direction_changes() {
-        // "ab" then "אב" displayed reversed: a, b, ב, א.
-        let bounds = [(0.0, 8.0), (8.0, 16.0), (24.0, 32.0), (16.0, 24.0)];
-        let text = "ab\u{5D0}\u{5D1}";
-        assert_eq!(caret_x(text, &bounds, 2), 16.0);
-        assert_eq!(caret_x(text, &bounds, 3), 24.0);
-        // "אב" then "ab": ב, א, a, b.
-        let bounds = [(8.0, 16.0), (0.0, 8.0), (16.0, 24.0), (24.0, 32.0)];
-        let text = "\u{5D0}\u{5D1}ab";
-        assert_eq!(caret_x(text, &bounds, 2), 16.0);
-        assert_eq!(caret_x(text, &bounds, 4), 32.0);
-        assert_eq!(caret_x("", &[], 0), 0.0);
+    fn selections_merge_where_characters_touch() {
         assert_eq!(
             selection_spans(&[(8.0, 16.0), (0.0, 8.0), (20.0, 24.0)]),
             [(0.0, 16.0), (20.0, 24.0)]

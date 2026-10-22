@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 form-core.workspace = true
+icu_properties = "2.3.0"
 prost = { version = "0.14.4", default-features = false, features = ["derive", "std"] }
 unicode-bidi = "0.3.18"
 unicode-linebreak = "0.1.5"

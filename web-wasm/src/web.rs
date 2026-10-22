@@ -588,8 +588,8 @@ impl Measure for CanvasMeasure {
         )
     }
 
-    fn dictionary_words(&self, run: &str) -> Vec<String> {
-        segments(self.words.as_ref(), run)
+    fn words(&self, text: &str) -> Vec<String> {
+        segments(self.words.as_ref(), text)
     }
 
     fn graphemes(&self, text: &str) -> Vec<String> {
