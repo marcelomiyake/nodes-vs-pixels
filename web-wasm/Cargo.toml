@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 form-core.workspace = true
 prost = { version = "0.14.4", default-features = false, features = ["derive", "std"] }
+unicode-linebreak = "0.1.5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3.106"
@@ -43,6 +44,9 @@ web-sys = { version = "0.3.106", features = [
   "TextMetrics",
   "Window",
 ] }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [build-dependencies]
 prost-build = "0.14.4"

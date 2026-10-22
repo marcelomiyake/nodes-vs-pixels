@@ -4,6 +4,7 @@ These files are shared by every project, so both frontends and the backend behav
 
 - `copy.json` holds every user-visible string: labels, placeholders, the password hint, buttons and violation messages.
 - `validation-cases.json` holds conformance vectors. Each case merges `input` over `base` and lists the expected violations in form order. `crates/form-core` and `web-react` run every case in their test suites.
+- `line-breaks.json` holds line break opportunities recorded from Chrome: each text laid out at `min-content` width, one entry per line. `web-wasm` breaks its canvas text at the same places.
 
 ## Validation rules
 

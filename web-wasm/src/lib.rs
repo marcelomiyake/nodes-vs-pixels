@@ -5,6 +5,7 @@
 pub mod form;
 pub mod grpc_web;
 pub mod style;
+pub mod text;
 
 /// Messages generated from `proto/signup/v1/signup.proto`.
 #[allow(clippy::all, clippy::pedantic)]
