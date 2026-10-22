@@ -4,7 +4,7 @@ CONTEXT := kind-$(CLUSTER)
 TAG := 0.1.0
 APPS := backend web-react web-wasm
 
-.PHONY: build test coverage sonar images kind-up deploy kind-down
+.PHONY: build test coverage sonar images kind-up deploy kind-down e2e screenshots lighthouse
 
 build:
 	cargo build --release --locked -p backend
@@ -49,3 +49,21 @@ deploy: images kind-up
 kind-down:
 	kind delete cluster --name $(CLUSTER)
 
+# The browser tests and checks below run against the Kind deployment.
+e2e:
+	pnpm --filter e2e test
+
+# Saves the README screenshots to docs/screenshots.
+screenshots:
+	pnpm --filter e2e screenshots
+
+# Audits both frontends with the mobile and desktop settings and prints each score.
+lighthouse:
+	mkdir -p lighthouse
+	for app in web-react:8081 web-wasm:8082; do \
+		lighthouse http://localhost:$${app#*:}/ --quiet --chrome-flags=--headless=new \
+			--output=json --output-path=lighthouse/$${app%:*}-mobile.json && \
+		lighthouse http://localhost:$${app#*:}/ --quiet --chrome-flags=--headless=new --preset=desktop \
+			--output=json --output-path=lighthouse/$${app%:*}-desktop.json || exit 1; \
+	done
+	@node -e 'for (const f of require("fs").readdirSync("lighthouse")) { const r = require("./lighthouse/" + f); console.log(f, Object.values(r.categories).map((c) => c.id + "=" + c.score * 100).join(" ")); }'
