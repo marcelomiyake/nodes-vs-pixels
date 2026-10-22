@@ -5,6 +5,7 @@
 pub mod form;
 pub mod grpc_web;
 pub mod layout;
+pub mod scene;
 pub mod style;
 pub mod text;
 

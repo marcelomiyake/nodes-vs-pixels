@@ -32,6 +32,26 @@ pub trait Measure {
     fn dictionary_words(&self, run: &str) -> Vec<String> {
         vec![run.to_owned()]
     }
+
+    /// Splits `text` into grapheme clusters, which a password input masks
+    /// one by one. The pieces must concatenate back to `text`.
+    fn graphemes(&self, text: &str) -> Vec<String> {
+        text.chars().map(String::from).collect()
+    }
+
+    /// The left and right edges of each character of `text` laid out on one
+    /// line, from where the text starts, in logical order: bidirectional
+    /// text places some runs right to left.
+    fn char_bounds(&self, text: &str, style: TextStyle) -> Vec<(f64, f64)> {
+        let mut prefix = String::new();
+        text.chars()
+            .map(|c| {
+                let left = self.width(&prefix, style);
+                prefix.push(c);
+                (left, self.width(&prefix, style))
+            })
+            .collect()
+    }
 }
 
 /// The alphabetic baseline of a line box whose top edge is `line_top`.
@@ -546,8 +566,10 @@ pub mod testing {
     use super::{FontMetrics, Measure};
     use crate::style::TextStyle;
 
-    /// Every character is half the font size wide, and spaceless scripts
-    /// split into three-character "words".
+    /// Every character is half the font size wide, spaceless scripts split
+    /// into three-character "words", combining diacritics join the
+    /// character before them, and text made only of Hebrew letters runs
+    /// right to left.
     pub struct FixedMeasure;
 
     impl Measure for FixedMeasure {
@@ -567,6 +589,32 @@ pub mod testing {
         fn dictionary_words(&self, run: &str) -> Vec<String> {
             let chars: Vec<char> = run.chars().collect();
             chars.chunks(3).map(|word| word.iter().collect()).collect()
+        }
+
+        fn graphemes(&self, text: &str) -> Vec<String> {
+            let mut graphemes: Vec<String> = Vec::new();
+            for c in text.chars() {
+                match graphemes.last_mut() {
+                    Some(last) if ('\u{300}'..='\u{36F}').contains(&c) => last.push(c),
+                    _ => graphemes.push(c.to_string()),
+                }
+            }
+            graphemes
+        }
+
+        fn char_bounds(&self, text: &str, style: TextStyle) -> Vec<(f64, f64)> {
+            let rtl =
+                !text.is_empty() && text.chars().all(|c| ('\u{5D0}'..='\u{5EA}').contains(&c));
+            let count = text.chars().count();
+            let advance = style.size / 2.0;
+            (0..count)
+                .map(|index| {
+                    let slot = if rtl { count - 1 - index } else { index };
+                    #[allow(clippy::cast_precision_loss)]
+                    let left = slot as f64 * advance;
+                    (left, left + advance)
+                })
+                .collect()
         }
     }
 }
