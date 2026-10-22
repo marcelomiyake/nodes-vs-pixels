@@ -73,6 +73,9 @@ pub enum Effect {
     Focus,
     /// Put this text on the clipboard.
     Clipboard(String),
+    /// Scroll the page to the focused input's caret, as Chrome does once a
+    /// key edits the input or moves its selection.
+    Reveal,
     /// Send the request, then report the outcome as [`Event::Response`].
     Send(SignUpRequest),
 }
@@ -663,7 +666,7 @@ impl App {
             }
             "Backspace" | "Delete" => {
                 let forward = key.key == "Delete";
-                self.edit(field, page, measure, |editor, text| {
+                let outcome = self.edit(field, page, measure, |editor, text| {
                     // Command deletes to the start, or the end, of the line.
                     if line && editor.range().is_empty() {
                         let motion = if forward {
@@ -681,7 +684,12 @@ impl App {
                     editor
                         .delete(text, forward, word)
                         .map(|value| (edit, value))
-                })
+                });
+                // Chrome scrolls to the caret even with nothing to delete.
+                Outcome {
+                    effect: (!self.state.locked()).then_some(Effect::Reveal),
+                    ..outcome
+                }
             }
             typed if self.inserts(key) => self.edit(field, page, measure, |editor, text| {
                 Some((Edit::Type, editor.replace(text, typed)))
@@ -712,7 +720,10 @@ impl App {
         let mut text = InputText::new(field, self.state.text(field), measure);
         let before = self.editor(field);
         let mut editor = before;
-        if let Some((edit, value)) = change(&mut editor, &text) {
+        let changed = change(&mut editor, &text);
+        let moved = (editor.anchor, editor.head) != (before.anchor, before.head);
+        let edited = changed.is_some();
+        if let Some((edit, value)) = changed {
             let old = self.state.text(field).to_owned();
             // A read-only input, while the form submits, keeps its value.
             if !self.state.set_text(field, &value) {
@@ -721,7 +732,7 @@ impl App {
             text = InputText::new(field, &value, measure);
             let (before, after) = (snapshot(field, old, before), snapshot(field, value, editor));
             self.history.record(edit, before, after);
-        } else if (editor.anchor, editor.head) != (before.anchor, before.head) {
+        } else if moved {
             // Moving the selection ends the typing in a row.
             self.history.close();
         }
@@ -730,7 +741,8 @@ impl App {
         Outcome {
             handled: true,
             blink: true,
-            effect: None,
+            // Not in a read-only input, while the form submits.
+            effect: ((edited || moved) && !self.state.locked()).then_some(Effect::Reveal),
         }
     }
 
@@ -843,7 +855,7 @@ impl App {
                     self.mouse = Mouse::Selecting(field);
                 }
                 let x = at.0 - content_x(page, field) + self.editor(field).scroll;
-                match clicks {
+                let outcome = match clicks {
                     0 | 1 => self.place(field, at.0, extend, page, measure),
                     2 => {
                         let mut word = 0..0;
@@ -859,6 +871,11 @@ impl App {
                         editor.select(0..text.len());
                         None
                     }),
+                };
+                // Unlike a key, a click leaves the page where it is.
+                Outcome {
+                    effect: None,
+                    ..outcome
                 }
             }
             Some(Target::Check) => {
@@ -977,6 +994,7 @@ impl App {
         } else {
             Outcome::handled()
         };
+        // Chrome does not scroll to the caret after a cut.
         outcome.effect = Some(Effect::Clipboard(selected));
         outcome
     }
@@ -1688,6 +1706,35 @@ mod tests {
         let terms = Some(Target::Label(Field::AcceptTerms));
         assert_eq!(hit(&page, (end - 1.0, label.rect.y + 1.0), &Narrow), terms);
         assert_eq!(hit(&page, (end + 1.0, label.rect.y + 1.0), &Narrow), None);
+    }
+
+    #[test]
+    fn keys_that_edit_or_move_the_caret_scroll_the_page_to_it() {
+        let mut app = focused();
+        let reveal = Some(Effect::Reveal);
+        assert_eq!(key(&mut app, "a").effect, reveal);
+        key(&mut app, "b");
+        assert_eq!(key(&mut app, "Home").effect, reveal);
+        assert_eq!(key(&mut app, "ArrowLeft").effect, None);
+        // Backspace and Delete do even with nothing to delete.
+        assert_eq!(key(&mut app, "Backspace").effect, reveal);
+        assert_eq!(press(&mut app, "a", |key| key.ctrl = true).effect, None);
+        let cut = send(&mut app, Event::Cut).effect;
+        assert_eq!(cut, Some(Effect::Clipboard("ab".to_owned())));
+        assert_eq!(send(&mut app, Event::Paste("xy".to_owned())).effect, reveal);
+        let input = form(&app).fields[0].input;
+        let start = (input.x + 14.0, input.y + input.height / 2.0);
+        assert_eq!(click(&mut app, start).effect, None);
+        assert_eq!(selection(&app), (0, 0));
+        assert_eq!(press(&mut app, "z", |key| key.ctrl = true).effect, None);
+        // Nor does a key in a read-only input, while the form submits.
+        fill(&mut app);
+        assert!(matches!(
+            key(&mut app, "Enter").effect,
+            Some(Effect::Send(_))
+        ));
+        assert_eq!(key(&mut app, "End").effect, None);
+        assert_eq!(selection(&app), (12, 12));
     }
 
     #[test]

@@ -147,6 +147,80 @@ pub struct Layout {
     pub height: f64,
     pub card: Rect,
     pub content: Content,
+    /// The viewport it is laid out for.
+    pub viewport: Viewport,
+}
+
+/// A box of the form, by the React app's element it stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Logo,
+    Title,
+    Subtitle,
+    Label(Field),
+    /// A text input, or the terms checkbox.
+    Input(Field),
+    Message(Field),
+    Button,
+    Alert,
+}
+
+impl Layout {
+    /// The form's boxes in document order. The success panel has none: it
+    /// replaces them all.
+    #[must_use]
+    pub fn parts(&self) -> Vec<(Part, Rect)> {
+        let Content::Form(form) = &self.content else {
+            return Vec::new();
+        };
+        let mut parts = vec![
+            (Part::Logo, form.logo),
+            (Part::Title, form.title.rect),
+            (Part::Subtitle, form.subtitle.rect),
+        ];
+        let terms = (
+            Field::AcceptTerms,
+            form.terms.check,
+            &form.terms.label,
+            &form.terms.message,
+        );
+        let fields = form
+            .fields
+            .iter()
+            .map(|field| (field.field, field.input, &field.label, &field.message));
+        for (field, input, label, message) in fields {
+            parts.extend([
+                (Part::Label(field), label.rect),
+                (Part::Input(field), input),
+            ]);
+            parts.extend(message.as_ref().map(|m| (Part::Message(field), m.rect)));
+        }
+        // The checkbox comes before its label.
+        let (field, check, label, message) = terms;
+        parts.extend([
+            (Part::Input(field), check),
+            (Part::Label(field), label.rect),
+        ]);
+        parts.extend(message.as_ref().map(|m| (Part::Message(field), m.rect)));
+        parts.push((Part::Button, form.button));
+        parts.extend(form.error.as_ref().map(|error| (Part::Alert, error.rect)));
+        parts
+    }
+
+    /// The part that Chrome's scroll anchoring keeps in place while the page
+    /// changes around a view from `top`, `height` tall: the first in view,
+    /// even partly, as Chrome looks no further than inside an element partly
+    /// in view. Chrome does not anchor a page scrolled to its top.
+    #[must_use]
+    pub fn anchor(&self, top: f64, height: f64) -> Option<(Part, Rect)> {
+        if top <= 0.0 {
+            return None;
+        }
+        let bottom = top + height;
+        self.parts()
+            .into_iter()
+            .find(|(_, rect)| rect.y < bottom && rect.bottom() > top)
+    }
 }
 
 /// The browser window as CSS sees it.
@@ -160,11 +234,25 @@ pub struct Viewport {
     pub media_width: f64,
 }
 
+impl Viewport {
+    /// Whether the `sm` breakpoint applies.
+    fn wide(self) -> bool {
+        self.media_width >= breakpoint::SM
+    }
+
+    /// Whether Chrome's scroll anchoring holds across a change to `next`: it
+    /// stops when the page's own box changes style, as its `min-h-dvh` does
+    /// with the height and its padding at the breakpoint.
+    #[must_use]
+    pub fn keeps_anchor(self, next: Self) -> bool {
+        self.height.total_cmp(&next.height).is_eq() && self.wide() == next.wide()
+    }
+}
+
 /// Lays out the page for `state`.
 #[must_use]
 pub fn layout(viewport: Viewport, state: &FormState, measure: &impl Measure) -> Layout {
-    let wide = viewport.media_width >= breakpoint::SM;
-    let (page_y, card_pad) = if wide {
+    let (page_y, card_pad) = if viewport.wide() {
         (spacing::PAGE_Y_WIDE, spacing::CARD_PAD_WIDE)
     } else {
         (spacing::PAGE_Y, spacing::CARD_PAD)
@@ -200,6 +288,7 @@ pub fn layout(viewport: Viewport, state: &FormState, measure: &impl Measure) -> 
         height,
         card,
         content,
+        viewport,
     }
 }
 
@@ -384,6 +473,48 @@ mod tests {
             Content::Form(form) => form,
             Content::Success(_) => panic!("expected the form"),
         }
+    }
+
+    #[test]
+    fn the_anchor_is_the_first_part_in_view() {
+        let short = Viewport {
+            height: 300.0,
+            ..PHONE
+        };
+        let mut state = FormState::default();
+        let page = layout(short, &state, &FixedMeasure);
+        let email = form_of(&page).fields[1].clone();
+        // Even cut off, before the input wholly in view.
+        let label = Some((Part::Label(Field::Email), email.label.rect));
+        assert_eq!(page.anchor(email.label.rect.y + 1.0, 300.0), label);
+        // The gap between fields is no part.
+        assert_eq!(page.anchor(email.label.rect.y - 1.0, 300.0), label);
+        assert_eq!(page.anchor(0.0, 300.0), None);
+        // A message above it moves the anchor down by its height.
+        state.blur(Field::FullName);
+        let below = layout(short, &state, &FixedMeasure);
+        let moved = below
+            .parts()
+            .into_iter()
+            .find(|&(part, _)| part == Part::Input(Field::Email));
+        let message = form_of(&below).fields[0].message.clone().map(|m| m.rect);
+        assert_eq!(
+            moved.map(|(_, rect)| rect.y - email.input.y),
+            message.map(|rect| rect.height + spacing::LABEL_GAP)
+        );
+        assert_eq!(below.parts().len(), page.parts().len() + 1);
+        // Unless the page's box changes with the viewport.
+        let narrow = Viewport {
+            width: 320.0,
+            media_width: 320.0,
+            ..short
+        };
+        assert!(short.keeps_anchor(narrow));
+        assert!(!short.keeps_anchor(PHONE));
+        assert!(!short.keeps_anchor(Viewport {
+            media_width: 1280.0,
+            ..short
+        }));
     }
 
     #[test]

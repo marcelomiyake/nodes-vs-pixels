@@ -87,6 +87,24 @@ test.describe('both apps, driven alike', () => {
   });
 });
 
+test('both apps scroll a short page alike while editing', async ({ browser }) => {
+  const pair = await Pair.open(browser, { width: 390, height: 300 });
+  const scrolls = () => Promise.all(pair.pages.map((page) => page.evaluate(() => Math.round(scrollY))));
+  const toBottom = () => pair.each((page) => page.evaluate(() => scrollTo(0, document.body.scrollHeight)));
+  await pair.click('#fullName');
+  await pair.press('Tab');
+  // From the bottom: Tab shows the email's error above the view, which
+  // stays put, then scrolls the password into it; typing scrolls back to
+  // the caret, and a key that moves nothing does not.
+  for (const key of ['Tab', 'End', 'x']) {
+    await toBottom();
+    await pair.press(key);
+    const [react, wasm] = await scrolls();
+    expect(wasm, key).toBe(react);
+  }
+  await pair.close();
+});
+
 test('the canvas app is one canvas that takes all input', async ({ page }) => {
   await open(page, APPS[1].url);
   expect(await page.evaluate(() => [...document.body.children].map((element) => element.tagName))).toEqual([

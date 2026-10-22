@@ -19,7 +19,7 @@ use web_sys::{
 use crate::form::Status;
 use crate::grpc_web::{self, CallError, RawResponse};
 use crate::input::{App, Device, Effect, Event, Key, Outcome};
-use crate::layout::{Content, Layout, Rect, Viewport, layout};
+use crate::layout::{Content, Layout, Part, Rect, Viewport, layout};
 use crate::proto::{SignUpRequest, SignUpResponse};
 use crate::scene::{self, Control, Painter};
 use crate::style::{Shadow, TextStyle};
@@ -112,6 +112,15 @@ struct Browser {
     entry_scroll: Option<f64>,
 }
 
+/// What Chrome's scroll anchoring holds in place while the layout changes.
+struct Anchor {
+    part: Part,
+    rect: Rect,
+    /// How far the page was scrolled.
+    top: f64,
+    viewport: Viewport,
+}
+
 impl Browser {
     /// Starts the caret's blink period over, so that it stays visible for a
     /// whole period after it moves, as in Chrome.
@@ -180,14 +189,48 @@ impl Browser {
         Ok(())
     }
 
-    /// Scrolls a control that focus moved to into view as Chrome scrolls a
-    /// focused element: not at all when it is in view, to its nearest edge
-    /// when it is partly in view, and to the middle of the view otherwise.
-    fn reveal(&self, control: Control) -> Result<(), JsValue> {
+    /// The part of the page in view: its top and its height.
+    fn view(&self) -> Result<(f64, f64), JsValue> {
+        let html = self.document.document_element().ok_or("no <html>")?;
+        Ok((self.window.scroll_y()?, f64::from(html.client_height())))
+    }
+
+    /// The part of the page that Chrome's scroll anchoring keeps in place.
+    fn anchor(&self) -> Result<Option<Anchor>, JsValue> {
+        let (top, height) = self.view()?;
+        let anchor = self.page.anchor(top, height);
+        Ok(anchor.map(|(part, rect)| Anchor {
+            part,
+            rect,
+            top,
+            viewport: self.page.viewport,
+        }))
+    }
+
+    /// Scrolls the page by as far as `anchor` moved with the layout, so that
+    /// the page above it can change without moving what is in view.
+    fn keep(&self, anchor: Option<Anchor>) -> Result<(), JsValue> {
+        let viewport = self.page.viewport;
+        let anchor = anchor.filter(|anchor| anchor.viewport.keeps_anchor(viewport));
+        let moved = anchor.and_then(|anchor| {
+            let parts = self.page.parts();
+            let &(_, after) = parts.iter().find(|&&(part, _)| part == anchor.part)?;
+            // From where the page was, which a shorter page may have clamped.
+            let delta = after.y - anchor.rect.y;
+            (delta != 0.0).then_some(anchor.top + delta)
+        });
+        if let Some(y) = moved {
+            self.window
+                .scroll_to_with_x_and_y(self.window.scroll_x()?, y);
+        }
+        Ok(())
+    }
+
+    fn rect(&self, control: Control) -> Rect {
         let Content::Form(form) = &self.page.content else {
-            return Ok(());
+            return Rect::default();
         };
-        let rect = match control {
+        match control {
             Control::Field(Field::AcceptTerms) => form.terms.check,
             Control::Field(field) => form
                 .fields
@@ -195,12 +238,30 @@ impl Browser {
                 .find(|layout| layout.field == field)
                 .map_or_else(Rect::default, |layout| layout.input),
             Control::Button => form.button,
+        }
+    }
+
+    /// Scrolls a control that focus moved to into view as Chrome scrolls a
+    /// focused element: not at all when it is in view, to its nearest edge
+    /// when it is partly in view, and to the middle of the view otherwise.
+    fn reveal(&self, control: Control) -> Result<(), JsValue> {
+        self.scroll_into_view(self.rect(control), true)
+    }
+
+    /// Scrolls the focused input's caret into view as Chrome does while
+    /// editing: to its nearest edge, even when it is out of view.
+    fn reveal_caret(&self) -> Result<(), JsValue> {
+        let Some(field) = self.app.editing() else {
+            return Ok(());
         };
-        let html = self.document.document_element().ok_or("no <html>")?;
-        let height = f64::from(html.client_height());
-        let top = self.window.scroll_y()?;
+        let input = self.rect(Control::Field(field));
+        self.scroll_into_view(scene::caret_line(input, &self.measure), false)
+    }
+
+    fn scroll_into_view(&self, rect: Rect, center: bool) -> Result<(), JsValue> {
+        let (top, height) = self.view()?;
         let bottom = top + height;
-        let y = if rect.bottom() <= top || rect.y >= bottom {
+        let y = if center && (rect.bottom() <= top || rect.y >= bottom) {
             rect.y + (rect.height - height) / 2.0
         } else if rect.y < top {
             rect.y
@@ -242,11 +303,12 @@ fn dispatch(shared: &Shared, event: Event) -> Option<Outcome> {
         return None;
     };
     // Tab, from the page or from the browser's own controls, scrolls the
-    // control it focuses into view.
-    let keyboard = matches!(event, Event::Key(_) | Event::KeyUp(_) | Event::Focus);
+    // control it focuses into view; a click or an undo does not.
+    let tab = matches!(&event, Event::Key(key) | Event::KeyUp(key) if key.key == "Tab");
     let (entering, released) = (event == Event::Focus, matches!(event, Event::KeyUp(_)));
     let browser = &mut *borrowed;
     let focus = browser.app.interaction(&browser.page).focus;
+    let anchor = browser.anchor();
     // A resize applies to the new layout.
     let mut result = if event == Event::Resize {
         browser.lay_out()
@@ -255,12 +317,14 @@ fn dispatch(shared: &Shared, event: Event) -> Option<Outcome> {
     };
     let mut outcome = browser.app.handle(event, &browser.page, &browser.measure);
     result = result.and_then(|()| browser.render());
+    result = result.and_then(|()| browser.keep(anchor?));
     if outcome.blink {
         result = result.and_then(|()| browser.restart_blink());
     }
     if !browser.framing && browser.app.autoscrolling(&browser.page, &browser.measure) {
         result = result.and_then(|()| browser.request_frame());
     }
+    let keyboard = tab || (entering && browser.app.entering_first());
     let moved =
         browser.app.interaction(&browser.page).focus.filter(|&now| {
             Some(now) != focus && (keyboard || outcome.effect == Some(Effect::Focus))
@@ -279,6 +343,9 @@ fn dispatch(shared: &Shared, event: Event) -> Option<Outcome> {
     }
     if !browser.app.entering_first() {
         browser.entry_scroll = None;
+    }
+    if outcome.effect == Some(Effect::Reveal) {
+        result = result.and_then(|()| browser.reveal_caret());
     }
     let canvas = browser.canvas.clone();
     drop(borrowed);

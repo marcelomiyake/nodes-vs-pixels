@@ -167,6 +167,29 @@ fn paint_form(
     }
 }
 
+/// Where a text input's line sits: its baseline, and the box of its glyphs,
+/// to which Chrome sizes the caret and the selection rather than the line.
+fn input_line(input: Rect, measure: &impl Measure) -> (f64, Rect) {
+    let style = text::BODY;
+    let line_top = input.y + (input.height - style.line_height) / 2.0;
+    let metrics = measure.metrics(style);
+    let text_baseline = baseline(line_top, style, metrics);
+    let glyphs = Rect::new(
+        0.0,
+        text_baseline - metrics.ascent,
+        0.0,
+        metrics.ascent + metrics.descent,
+    );
+    (text_baseline, glyphs)
+}
+
+/// The top and the height of the caret in a text input, which Chrome
+/// scrolls the page to while editing.
+#[must_use]
+pub fn caret_line(input: Rect, measure: &impl Measure) -> Rect {
+    input_line(input, measure).1
+}
+
 /// The value or placeholder of a text input, with the selection and caret
 /// when it has focus. Text is clipped to the content box and scrolls with it.
 fn paint_input(
@@ -179,16 +202,7 @@ fn paint_input(
 ) {
     let style = text::BODY;
     let content = content_box(input);
-    let line_top = input.y + (input.height - style.line_height) / 2.0;
-    let metrics = measure.metrics(style);
-    let text_baseline = baseline(line_top, style, metrics);
-    // Chrome sizes the caret and the selection to the font, not the line.
-    let glyphs = Rect::new(
-        0.0,
-        text_baseline - metrics.ascent,
-        0.0,
-        metrics.ascent + metrics.descent,
-    );
+    let (text_baseline, glyphs) = input_line(input, measure);
     let value = state.text(field);
     // Only the focused input needs to know where its characters are.
     let text = editor.map(|_| InputText::new(field, value, measure));
@@ -526,6 +540,8 @@ mod tests {
         // The caret follows two 8px characters and spans ascent plus descent.
         let caret = Rect::new(origin + 16.0, input.y + 12.0, 1.0, 20.0);
         assert!(painter.rects(color::INK).contains(&caret));
+        let line = caret_line(input, &FixedMeasure);
+        assert_eq!((line.y, line.height), (caret.y, caret.height));
 
         let blink = Interaction {
             caret_visible: false,
