@@ -2,9 +2,11 @@
 //! this crate; transparent native controls laid over the canvas provide
 //! focus, typing, autofill and the accessibility tree.
 
+pub mod app;
 pub mod form;
 pub mod grpc_web;
 pub mod layout;
+pub mod overlay;
 pub mod scene;
 pub mod style;
 pub mod text;
