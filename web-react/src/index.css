@@ -1,0 +1,8 @@
+@import 'tailwindcss';
+@import './generated/theme.css';
+
+@layer base {
+  body {
+    @apply bg-page font-sans text-ink;
+  }
+}

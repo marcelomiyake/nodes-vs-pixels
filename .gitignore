@@ -164,3 +164,5 @@ blob-report/
 .scannerwork/
 lcov.info
 lighthouse/
+web-react/public/fonts/
+web-react/public/favicon.svg

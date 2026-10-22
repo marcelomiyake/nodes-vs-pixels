@@ -2,3 +2,15 @@ packages:
   - seo
   - web-react
   - e2e
+allowBuilds:
+  '@bufbuild/buf': true
+minimumReleaseAgeExclude:
+  - '@bufbuild/buf-darwin-arm64@1.75.0'
+  - '@bufbuild/buf-darwin-x64@1.75.0'
+  - '@bufbuild/buf-linux-aarch64@1.75.0'
+  - '@bufbuild/buf-linux-armv7@1.75.0'
+  - '@bufbuild/buf-linux-x64@1.75.0'
+  - '@bufbuild/buf-win32-arm64@1.75.0'
+  - '@bufbuild/buf-win32-x64@1.75.0'
+  - '@bufbuild/buf@1.75.0'
+  - vite@8.3.5
