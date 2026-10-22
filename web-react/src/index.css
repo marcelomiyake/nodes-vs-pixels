@@ -5,4 +5,9 @@
   body {
     @apply bg-page font-sans text-ink;
   }
+
+  /* A token color instead of the platform's, so the canvas app can match it. */
+  ::selection {
+    @apply bg-brand-ring;
+  }
 }
