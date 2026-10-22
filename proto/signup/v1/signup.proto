@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package signup.v1;
+
+// SignupService registers accounts submitted through the sign-up form.
+service SignupService {
+  // SignUp validates the form and creates the account when every field is valid.
+  rpc SignUp(SignUpRequest) returns (SignUpResponse);
+}
+
+message SignUpRequest {
+  string full_name = 1;
+  string email = 2;
+  string password = 3;
+  string confirm_password = 4;
+  bool accept_terms = 5;
+}
+
+message SignUpResponse {
+  // Identifier of the created account; empty when the form was rejected.
+  string account_id = 1;
+  // One entry per invalid field, in form order; empty when the form was accepted.
+  repeated FieldViolation violations = 2;
+}
+
+message FieldViolation {
+  Field field = 1;
+  ViolationCode code = 2;
+}
+
+enum Field {
+  FIELD_UNSPECIFIED = 0;
+  FIELD_FULL_NAME = 1;
+  FIELD_EMAIL = 2;
+  FIELD_PASSWORD = 3;
+  FIELD_CONFIRM_PASSWORD = 4;
+  FIELD_ACCEPT_TERMS = 5;
+}
+
+enum ViolationCode {
+  VIOLATION_CODE_UNSPECIFIED = 0;
+  VIOLATION_CODE_REQUIRED = 1;
+  VIOLATION_CODE_TOO_SHORT = 2;
+  VIOLATION_CODE_TOO_LONG = 3;
+  VIOLATION_CODE_INVALID_CHARACTERS = 4;
+  VIOLATION_CODE_INVALID_FORMAT = 5;
+  VIOLATION_CODE_WEAK = 6;
+  VIOLATION_CODE_MISMATCH = 7;
+}

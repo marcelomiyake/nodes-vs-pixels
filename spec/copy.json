@@ -1,0 +1,66 @@
+{
+  "brand": "np",
+  "title": "Create your account",
+  "subtitle": "Join in under a minute. All fields are required.",
+  "fields": {
+    "fullName": {
+      "label": "Full name",
+      "placeholder": "Ada Lovelace",
+      "type": "text",
+      "autocomplete": "name"
+    },
+    "email": {
+      "label": "Email",
+      "placeholder": "ada@example.com",
+      "type": "email",
+      "autocomplete": "email"
+    },
+    "password": {
+      "label": "Password",
+      "placeholder": "At least 12 characters",
+      "type": "password",
+      "autocomplete": "new-password",
+      "hint": "Use upper and lowercase letters, a number and a symbol."
+    },
+    "confirmPassword": {
+      "label": "Confirm password",
+      "placeholder": "Repeat your password",
+      "type": "password",
+      "autocomplete": "new-password"
+    }
+  },
+  "terms": "I agree to the terms of service and privacy policy.",
+  "submit": "Create account",
+  "submitting": "Creating account…",
+  "networkError": "We couldn't reach the server. Please try again.",
+  "success": {
+    "title": "Account created",
+    "body": "Welcome aboard, {name}. Your account is ready."
+  },
+  "violations": {
+    "fullName": {
+      "REQUIRED": "Enter your full name.",
+      "TOO_SHORT": "Name must be at least 2 characters.",
+      "TOO_LONG": "Name must be at most 80 characters.",
+      "INVALID_CHARACTERS": "Use letters, spaces, apostrophes and hyphens."
+    },
+    "email": {
+      "REQUIRED": "Enter your email address.",
+      "TOO_LONG": "Email must be at most 254 characters.",
+      "INVALID_FORMAT": "Enter a valid email, like ada@example.com."
+    },
+    "password": {
+      "REQUIRED": "Create a password.",
+      "TOO_SHORT": "Password must be at least 12 characters.",
+      "TOO_LONG": "Password must be at most 128 characters.",
+      "WEAK": "Use upper and lowercase letters, a number and a symbol."
+    },
+    "confirmPassword": {
+      "REQUIRED": "Confirm your password.",
+      "MISMATCH": "Passwords don't match."
+    },
+    "acceptTerms": {
+      "REQUIRED": "Accept the terms to continue."
+    }
+  }
+}

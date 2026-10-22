@@ -1,0 +1,476 @@
+{
+  "base": {
+    "fullName": "Ada Lovelace",
+    "email": "ada@example.com",
+    "password": "Analytical#Engine1",
+    "confirmPassword": "Analytical#Engine1",
+    "acceptTerms": true
+  },
+  "cases": [
+    {
+      "name": "valid form",
+      "input": {},
+      "violations": []
+    },
+    {
+      "name": "name is trimmed",
+      "input": {
+        "fullName": "  Ada Lovelace  "
+      },
+      "violations": []
+    },
+    {
+      "name": "name allows accents, apostrophes and hyphens",
+      "input": {
+        "fullName": "Zoë O’Brien-Núñez"
+      },
+      "violations": []
+    },
+    {
+      "name": "name allows ASCII apostrophe",
+      "input": {
+        "fullName": "D'Angelo Russell"
+      },
+      "violations": []
+    },
+    {
+      "name": "name allows non-Latin letters",
+      "input": {
+        "fullName": "李小龍"
+      },
+      "violations": []
+    },
+    {
+      "name": "name of exactly 2 characters",
+      "input": {
+        "fullName": "Al"
+      },
+      "violations": []
+    },
+    {
+      "name": "name of exactly 80 characters",
+      "input": {
+        "fullName": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "violations": []
+    },
+    {
+      "name": "name is required",
+      "input": {
+        "fullName": ""
+      },
+      "violations": [
+        {
+          "field": "fullName",
+          "code": "REQUIRED"
+        }
+      ]
+    },
+    {
+      "name": "name of only spaces is required",
+      "input": {
+        "fullName": "   "
+      },
+      "violations": [
+        {
+          "field": "fullName",
+          "code": "REQUIRED"
+        }
+      ]
+    },
+    {
+      "name": "name shorter than 2 characters",
+      "input": {
+        "fullName": "A"
+      },
+      "violations": [
+        {
+          "field": "fullName",
+          "code": "TOO_SHORT"
+        }
+      ]
+    },
+    {
+      "name": "name longer than 80 characters",
+      "input": {
+        "fullName": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "violations": [
+        {
+          "field": "fullName",
+          "code": "TOO_LONG"
+        }
+      ]
+    },
+    {
+      "name": "name with a digit",
+      "input": {
+        "fullName": "Ada 2"
+      },
+      "violations": [
+        {
+          "field": "fullName",
+          "code": "INVALID_CHARACTERS"
+        }
+      ]
+    },
+    {
+      "name": "name with punctuation",
+      "input": {
+        "fullName": "Ada!"
+      },
+      "violations": [
+        {
+          "field": "fullName",
+          "code": "INVALID_CHARACTERS"
+        }
+      ]
+    },
+    {
+      "name": "email is trimmed",
+      "input": {
+        "email": "  ada@example.com "
+      },
+      "violations": []
+    },
+    {
+      "name": "email of exactly 254 characters",
+      "input": {
+        "email": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com"
+      },
+      "violations": []
+    },
+    {
+      "name": "email is required",
+      "input": {
+        "email": ""
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "REQUIRED"
+        }
+      ]
+    },
+    {
+      "name": "email longer than 254 characters",
+      "input": {
+        "email": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com"
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "TOO_LONG"
+        }
+      ]
+    },
+    {
+      "name": "email without @",
+      "input": {
+        "email": "ada.example.com"
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "INVALID_FORMAT"
+        }
+      ]
+    },
+    {
+      "name": "email with two @",
+      "input": {
+        "email": "ada@@example.com"
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "INVALID_FORMAT"
+        }
+      ]
+    },
+    {
+      "name": "email without local part",
+      "input": {
+        "email": "@example.com"
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "INVALID_FORMAT"
+        }
+      ]
+    },
+    {
+      "name": "email domain without dot",
+      "input": {
+        "email": "ada@example"
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "INVALID_FORMAT"
+        }
+      ]
+    },
+    {
+      "name": "email domain with empty label",
+      "input": {
+        "email": "ada@example..com"
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "INVALID_FORMAT"
+        }
+      ]
+    },
+    {
+      "name": "email domain starting with dot",
+      "input": {
+        "email": "ada@.example.com"
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "INVALID_FORMAT"
+        }
+      ]
+    },
+    {
+      "name": "email domain ending with dot",
+      "input": {
+        "email": "ada@example.com."
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "INVALID_FORMAT"
+        }
+      ]
+    },
+    {
+      "name": "email with inner space",
+      "input": {
+        "email": "ada lovelace@example.com"
+      },
+      "violations": [
+        {
+          "field": "email",
+          "code": "INVALID_FORMAT"
+        }
+      ]
+    },
+    {
+      "name": "password with non-ASCII letters",
+      "input": {
+        "password": "Ünïcödé#Pässwörd1",
+        "confirmPassword": "Ünïcödé#Pässwörd1"
+      },
+      "violations": []
+    },
+    {
+      "name": "password of exactly 12 characters",
+      "input": {
+        "password": "Abcdefghi#1z",
+        "confirmPassword": "Abcdefghi#1z"
+      },
+      "violations": []
+    },
+    {
+      "name": "password of exactly 128 characters",
+      "input": {
+        "password": "Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#",
+        "confirmPassword": "Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#"
+      },
+      "violations": []
+    },
+    {
+      "name": "password and confirmation are required",
+      "input": {
+        "password": "",
+        "confirmPassword": ""
+      },
+      "violations": [
+        {
+          "field": "password",
+          "code": "REQUIRED"
+        },
+        {
+          "field": "confirmPassword",
+          "code": "REQUIRED"
+        }
+      ]
+    },
+    {
+      "name": "password shorter than 12 characters",
+      "input": {
+        "password": "Ab1#Ab1#Ab1",
+        "confirmPassword": "Ab1#Ab1#Ab1"
+      },
+      "violations": [
+        {
+          "field": "password",
+          "code": "TOO_SHORT"
+        }
+      ]
+    },
+    {
+      "name": "password longer than 128 characters",
+      "input": {
+        "password": "Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#A",
+        "confirmPassword": "Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#Aa1#A"
+      },
+      "violations": [
+        {
+          "field": "password",
+          "code": "TOO_LONG"
+        }
+      ]
+    },
+    {
+      "name": "password without uppercase",
+      "input": {
+        "password": "analytical#engine1",
+        "confirmPassword": "analytical#engine1"
+      },
+      "violations": [
+        {
+          "field": "password",
+          "code": "WEAK"
+        }
+      ]
+    },
+    {
+      "name": "password without lowercase",
+      "input": {
+        "password": "ANALYTICAL#ENGINE1",
+        "confirmPassword": "ANALYTICAL#ENGINE1"
+      },
+      "violations": [
+        {
+          "field": "password",
+          "code": "WEAK"
+        }
+      ]
+    },
+    {
+      "name": "password without digit",
+      "input": {
+        "password": "Analytical#Engine",
+        "confirmPassword": "Analytical#Engine"
+      },
+      "violations": [
+        {
+          "field": "password",
+          "code": "WEAK"
+        }
+      ]
+    },
+    {
+      "name": "password without symbol",
+      "input": {
+        "password": "AnalyticalEngine1",
+        "confirmPassword": "AnalyticalEngine1"
+      },
+      "violations": [
+        {
+          "field": "password",
+          "code": "WEAK"
+        }
+      ]
+    },
+    {
+      "name": "space is not a symbol",
+      "input": {
+        "password": "Analytical Engine1",
+        "confirmPassword": "Analytical Engine1"
+      },
+      "violations": [
+        {
+          "field": "password",
+          "code": "WEAK"
+        }
+      ]
+    },
+    {
+      "name": "password is not trimmed",
+      "input": {
+        "password": "  Analytical#Engine1  "
+      },
+      "violations": [
+        {
+          "field": "confirmPassword",
+          "code": "MISMATCH"
+        }
+      ]
+    },
+    {
+      "name": "confirmation is required",
+      "input": {
+        "confirmPassword": ""
+      },
+      "violations": [
+        {
+          "field": "confirmPassword",
+          "code": "REQUIRED"
+        }
+      ]
+    },
+    {
+      "name": "confirmation must match",
+      "input": {
+        "confirmPassword": "Analytical#Engine2"
+      },
+      "violations": [
+        {
+          "field": "confirmPassword",
+          "code": "MISMATCH"
+        }
+      ]
+    },
+    {
+      "name": "terms must be accepted",
+      "input": {
+        "acceptTerms": false
+      },
+      "violations": [
+        {
+          "field": "acceptTerms",
+          "code": "REQUIRED"
+        }
+      ]
+    },
+    {
+      "name": "empty form",
+      "input": {
+        "fullName": "",
+        "email": "",
+        "password": "",
+        "confirmPassword": "",
+        "acceptTerms": false
+      },
+      "violations": [
+        {
+          "field": "fullName",
+          "code": "REQUIRED"
+        },
+        {
+          "field": "email",
+          "code": "REQUIRED"
+        },
+        {
+          "field": "password",
+          "code": "REQUIRED"
+        },
+        {
+          "field": "confirmPassword",
+          "code": "REQUIRED"
+        },
+        {
+          "field": "acceptTerms",
+          "code": "REQUIRED"
+        }
+      ]
+    }
+  ]
+}
