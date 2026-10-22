@@ -1,0 +1,30 @@
+# Images are built locally and loaded into Kind, so they are never pulled.
+imagePullPolicy: IfNotPresent
+
+backend:
+  image: nodes-vs-pixels/backend
+  port: 50051
+  replicas: 1
+  # The distroless image's nonroot user.
+  uid: 65532
+  resources:
+    requests: { cpu: 50m, memory: 32Mi, ephemeral-storage: 16Mi }
+    limits: { cpu: 500m, memory: 128Mi, ephemeral-storage: 64Mi }
+
+# Each frontend is nginx serving the static app and proxying gRPC-web to the backend.
+frontends:
+  web-react:
+    image: nodes-vs-pixels/web-react
+    nodePort: 30081
+  web-wasm:
+    image: nodes-vs-pixels/web-wasm
+    nodePort: 30082
+
+frontend:
+  port: 8080
+  replicas: 1
+  # The nginx-unprivileged image's nginx user.
+  uid: 101
+  resources:
+    requests: { cpu: 25m, memory: 32Mi, ephemeral-storage: 16Mi }
+    limits: { cpu: 250m, memory: 64Mi, ephemeral-storage: 64Mi }

@@ -1,0 +1,14 @@
+# A dedicated local cluster. The frontends' NodePorts are published on the
+# host as http://localhost:8081 (React) and http://localhost:8082 (WebAssembly).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: nodes-vs-pixels
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30081
+        hostPort: 8081
+        listenAddress: 127.0.0.1
+      - containerPort: 30082
+        hostPort: 8082
+        listenAddress: 127.0.0.1

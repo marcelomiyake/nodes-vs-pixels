@@ -1,0 +1,72 @@
+{{- range $name, $frontend := .Values.frontends }}
+{{- $ctx := dict "root" $ "component" $name }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "nodes-vs-pixels.labels" $ctx | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    {{- include "nodes-vs-pixels.selector" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $.Values.frontend.port }}
+      targetPort: http
+      nodePort: {{ $frontend.nodePort }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "nodes-vs-pixels.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $.Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "nodes-vs-pixels.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nodes-vs-pixels.labels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: nginx
+          image: "{{ $frontend.image }}:{{ $.Chart.AppVersion }}"
+          imagePullPolicy: {{ $.Values.imagePullPolicy }}
+          env:
+            - name: BACKEND_URL
+              value: "http://backend:{{ $.Values.backend.port }}"
+          ports:
+            - name: http
+              containerPort: {{ $.Values.frontend.port }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          resources:
+            {{- toYaml $.Values.frontend.resources | nindent 12 }}
+          securityContext:
+            {{- include "nodes-vs-pixels.containerSecurity" $.Values.frontend.uid | nindent 12 }}
+          # nginx renders its config template and keeps its pid and caches here.
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/conf.d
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: conf
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+{{- end }}

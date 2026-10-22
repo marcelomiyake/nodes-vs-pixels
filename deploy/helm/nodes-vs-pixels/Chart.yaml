@@ -1,0 +1,6 @@
+apiVersion: v2
+name: nodes-vs-pixels
+description: The sign-up form twice (React DOM and Rust WebAssembly canvas) and its Rust gRPC-web backend.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,54 @@
+{{- $ctx := dict "root" . "component" "backend" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    {{- include "nodes-vs-pixels.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "nodes-vs-pixels.selector" $ctx | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.backend.port }}
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    {{- include "nodes-vs-pixels.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "nodes-vs-pixels.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nodes-vs-pixels.labels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image }}:{{ .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          env:
+            - name: BACKEND_ADDR
+              value: "0.0.0.0:{{ .Values.backend.port }}"
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.backend.port }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          securityContext:
+            {{- include "nodes-vs-pixels.containerSecurity" .Values.backend.uid | nindent 12 }}
