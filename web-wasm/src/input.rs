@@ -11,7 +11,7 @@ use crate::editing::{Editor, InputText, Motion, content_box, single_line};
 use crate::form::{FormState, Status, Submission};
 use crate::grpc_web::CallError;
 use crate::history::{Edit, History, Snapshot};
-use crate::layout::{Content, Layout, Rect};
+use crate::layout::{Content, Layout, Rect, TEXT_FIELDS};
 use crate::proto::{SignUpRequest, SignUpResponse};
 use crate::scene::{Control, Interaction};
 use crate::text::Measure;
@@ -201,9 +201,10 @@ pub struct App {
     last_input: Option<Field>,
     pointer: Option<(f64, f64)>,
     mouse: Mouse,
-    /// Where on the page the last click on no control was: Tab continues
-    /// from there, as from Chrome's sequential focus navigation start point.
-    start: Option<f64>,
+    /// Where Tab continues from after a click on no control, as from
+    /// Chrome's sequential focus navigation starting point: the element
+    /// clicked, given by [`rank`] as the first control in it or after it.
+    start: Option<usize>,
 }
 
 impl App {
@@ -425,10 +426,12 @@ impl App {
         let next = match (current, self.start.take()) {
             (Some(index), _) if backward => index.checked_sub(1),
             (Some(index), _) => Some(index + 1),
-            (None, Some(y)) if backward => {
-                controls.iter().rposition(|(_, rect)| rect.bottom() <= y)
-            }
-            (None, Some(y)) => controls.iter().position(|(_, rect)| rect.y >= y),
+            (None, Some(start)) if backward => controls
+                .iter()
+                .rposition(|&(control, _)| rank(control) < start),
+            (None, Some(start)) => controls
+                .iter()
+                .position(|&(control, _)| rank(control) >= start),
             (None, None) if backward => controls.len().checked_sub(1),
             (None, None) => Some(0),
         };
@@ -871,7 +874,7 @@ impl App {
             _ => {
                 self.focus_on(None);
                 self.last_input = None;
-                self.start = Some(at.1);
+                self.start = Some(start_at(page, at));
                 Outcome::default()
             }
         }
@@ -1012,6 +1015,63 @@ fn hit(page: &Layout, at: (f64, f64), measure: &impl Measure) -> Option<Target> 
         return Some(Target::Check);
     }
     inside(form.button, at).then_some(Target::Button)
+}
+
+/// A control's place in Tab order, kept while the button cannot take focus.
+fn rank(control: Control) -> usize {
+    match control {
+        Control::Field(field) => TEXT_FIELDS
+            .iter()
+            .position(|&text| text == field)
+            .unwrap_or(TEXT_FIELDS.len()),
+        Control::Button => TEXT_FIELDS.len() + 1,
+    }
+}
+
+/// The [`rank`] of the first control in or after the React app's element at
+/// a point on no control: Tab goes on into that element, and Shift+Tab back
+/// from before it.
+fn start_at(page: &Layout, (x, y): (f64, f64)) -> usize {
+    let Content::Form(form) = &page.content else {
+        return 0;
+    };
+    let within = |top: f64, bottom: f64| (top..bottom).contains(&y);
+    // Each field's box spans the column, as its message and the button do;
+    // the card and the form around them hold every control.
+    let button = form.button;
+    if !(button.x..button.x + button.width).contains(&x) {
+        return 0;
+    }
+    let terms = &form.terms;
+    let fields = form
+        .fields
+        .iter()
+        .map(|field| (field.label.rect.y, field.input.bottom(), &field.message));
+    let row = (
+        terms.check.y,
+        terms.check.bottom().max(terms.label.rect.bottom()),
+        &terms.message,
+    );
+    for (rank, (top, bottom, message)) in fields.chain([row]).enumerate() {
+        if let Some(message) = message
+            && within(message.rect.y, message.rect.bottom())
+        {
+            return rank + 1;
+        }
+        if within(top, message.as_ref().map_or(bottom, |m| m.rect.bottom())) {
+            return rank;
+        }
+    }
+    // A disabled button and the alert after it come after every control.
+    let alert = form
+        .error
+        .as_ref()
+        .map_or(Rect::default(), |error| error.rect);
+    if within(button.y, button.bottom()) || within(alert.y, alert.bottom()) {
+        rank(Control::Button) + 1
+    } else {
+        0
+    }
 }
 
 fn inside(rect: Rect, (x, y): (f64, f64)) -> bool {
@@ -1631,24 +1691,51 @@ mod tests {
     }
 
     #[test]
-    fn tab_continues_from_a_click_on_the_page() {
+    fn tab_continues_from_the_element_clicked() {
         let mut app = focused();
-        let password = form(&app).fields[2].clone();
-        click(
-            &mut app,
-            (password.label.rect.x - 4.0, password.label.rect.y),
-        );
-        assert_eq!(focus(&app), None);
-        key(&mut app, "Tab");
-        assert_eq!(focus(&app), Some(Control::Field(Field::Password)));
-        // The full name's error moved the fields down.
-        let password = form(&app).fields[2].clone();
-        click(
-            &mut app,
-            (password.label.rect.x - 4.0, password.label.rect.y),
-        );
-        press(&mut app, "Tab", |key| key.shift = true);
-        assert_eq!(focus(&app), Some(Control::Field(Field::Email)));
+        // An empty submit shows every message.
+        key(&mut app, "Enter");
+        let form = form(&app);
+        let password = &form.fields[2];
+        let messages = [&password.message, &form.terms.message].map(|message| {
+            message
+                .as_ref()
+                .map_or_else(Rect::default, |message| message.rect)
+        });
+        let x = password.input.x + 4.0;
+        let field = |field| Some(Control::Field(field));
+        for (at, next, previous) in [
+            // Between a label and its input is the field's own box.
+            (
+                (x, password.input.y - 2.0),
+                field(Field::Password),
+                field(Field::Email),
+            ),
+            (
+                (x, messages[0].y + 1.0),
+                field(Field::ConfirmPassword),
+                field(Field::Password),
+            ),
+            (
+                (x, messages[1].y + 1.0),
+                Some(Control::Button),
+                field(Field::AcceptTerms),
+            ),
+            // Between fields is the form, and beside them the card.
+            (
+                (x, password.label.rect.y - 2.0),
+                field(Field::FullName),
+                None,
+            ),
+            ((x - 8.0, password.input.y), field(Field::FullName), None),
+        ] {
+            for (shift, focused) in [(false, next), (true, previous)] {
+                click(&mut app, at);
+                assert_eq!(focus(&app), None);
+                press(&mut app, "Tab", |key| key.shift = shift);
+                assert_eq!(focus(&app), focused, "{at:?}, shift {shift}");
+            }
+        }
     }
 
     #[test]
