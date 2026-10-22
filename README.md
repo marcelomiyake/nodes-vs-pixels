@@ -4,7 +4,7 @@ One sign-up form, built twice:
 
 - **web-react**: React, TypeScript and Tailwind CSS render DOM nodes.
 - **web-wasm**: Rust compiled to WebAssembly paints every pixel on a
-  single `<canvas>`, the page's only element.
+  single `<canvas>`.
 
 Both frontends talk to the same Rust **backend** over gRPC-web.
 
@@ -39,10 +39,10 @@ test fails if more than 0.5% of the pixels differ between the two.
 
 ## The canvas frontend
 
-The WebAssembly page has no inputs, labels or button: it is one focusable
-`<canvas>`, labelled as the page's main region. Rust lays the form out with
-the same design tokens and font as the React app, paints it, and handles
-everything Chrome's native controls do for the React app:
+The WebAssembly page has no inputs, labels or button: it is one focusable,
+labelled `<canvas>` in the page's `<main>` element. Rust lays the form out
+with the same design tokens and font as the React app, paints it, and
+handles everything Chrome's native controls do for the React app:
 
 - focus: Tab and Shift+Tab through the controls and out of the page, also
   coming in from the browser's own controls, with the focus ring shown after

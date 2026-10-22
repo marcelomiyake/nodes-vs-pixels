@@ -73,7 +73,7 @@ mod tests {
         assert!(page.contains(&format!("/fonts/{}", tokens::FONT_FILE)));
         assert!(page.contains("<title>"));
         assert!(page.contains(&format!(
-            r#"<canvas id="app" tabindex="0" role="main" aria-label="{}""#,
+            r#"<main><canvas id="app" tabindex="0" aria-label="{}""#,
             copy::TITLE
         )));
     }

@@ -107,13 +107,13 @@ test('both apps scroll a short page alike while editing', async ({ browser }) =>
 
 test('the canvas app is one canvas that takes all input', async ({ page }) => {
   await open(page, APPS[1].url);
-  expect(await page.evaluate(() => [...document.body.children].map((element) => element.tagName))).toEqual([
+  expect(await page.evaluate(() => [...document.body.querySelectorAll('*')].map((element) => element.tagName))).toEqual([
+    'MAIN',
     'CANVAS',
     'SCRIPT',
   ]);
-  const canvas = page.locator('canvas');
+  const canvas = page.getByRole('main').locator('canvas');
   await expect(canvas).toHaveAttribute('tabindex', '0');
-  await expect(canvas).toHaveRole('main');
   await expect(canvas).toHaveAccessibleName('Create your account');
   await expect(page.locator('input, button, label, select, textarea')).toHaveCount(0);
 });
