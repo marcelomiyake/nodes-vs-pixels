@@ -179,3 +179,223 @@ pnpm, Docker, Kind, kubectl and Helm.
 
 Once deployed, the React frontend is at http://localhost:8081 and the
 WebAssembly one at http://localhost:8082.
+
+## Inspecting CPU and memory
+
+Chrome can show the CPU and memory use of both frontends, the canvas one
+in less detail. Neither app measures itself: the code has no performance
+marks or memory counters, and `make lighthouse` audits page loads only.
+Its JSON reports in `lighthouse/` give the load's CPU time in the
+`bootup-time` and `mainthread-work-breakdown` audits, and nothing on
+memory.
+
+Measure one app at a time, against the Kind deployment (`make deploy`),
+in a Guest or Incognito window so that extensions add no work of their
+own. Both apps are on `localhost`, so Chrome may run their tabs in one
+process; close the other app's tabs first.
+
+### Chrome's tools
+
+| Tool | How to open it | What it shows | What it does not show |
+| --- | --- | --- | --- |
+| Task Manager | Shift+Esc on Linux and Windows, *Window > Task Manager* on macOS | The tab's CPU share and memory footprint, and its JavaScript and GPU memory once those columns are added with a right-click | Which code or object uses them. Chrome rasterizes pages in its GPU process, a separate row shared by every tab, so part of either app's drawing cost is not in the tab's row |
+| Performance monitor | DevTools, *⋮ > More tools > Performance monitor* | Live CPU use, JS heap size, DOM nodes, JS event listeners, and layouts and style recalculations per second | Which function runs. The JS heap size leaves out WebAssembly memory and canvas pixels |
+| Performance panel | DevTools, *Performance*, then record while using the page | Every main-thread task, split into scripting, rendering and painting, with a flame chart of the functions that ran; *Bottom-up* grouped by URL splits the time by file | Readable function names in the deployed builds (see below) |
+| Memory panel | DevTools, *Memory* | Heap snapshots of the JavaScript heap, to compare before and after an action, and allocation sampling | What is inside WebAssembly memory |
+| `performance.memory` | DevTools console | The JS heap's used and total size | Exact values: Chrome rounds them (both apps report 10,000,000 bytes) unless it is started with `--enable-precise-memory-info` |
+
+`performance.measureUserAgentSpecificMemory()`, which counts all of a
+page's memory, is not available on either app: it needs a cross-origin
+isolated page, and `deploy/nginx/default.conf.template` sends no
+`Cross-Origin-Opener-Policy` or `Cross-Origin-Embedder-Policy` header.
+
+To measure CPU while you use a page:
+
+1. Open the app, then DevTools (F12), and choose *Performance*.
+2. Under the panel's settings, set *CPU throttling* to a 4× slowdown, as
+   Lighthouse does for phones, so that short tasks stand out.
+3. Click *Record*, use the page (type in a field, Tab through the form,
+   submit it empty, then fill it in), and click *Stop*.
+4. Select a stretch of the *Main* track: *Summary* splits its time into
+   scripting, rendering and painting, and *Bottom-up* lists the functions
+   that took the most.
+
+To measure memory:
+
+1. Open *Memory*, choose *Heap snapshot*, and take one after the page loads.
+2. Use the page, click the trash-can icon to collect garbage, and take a
+   second snapshot.
+3. Show the second one in the *Comparison* view to list what was added and
+   what stays alive.
+
+### React
+
+Each tool above works on the React app, but the deployed bundle is
+minified and has no source maps (`web-react/vite.config.ts` does not set
+`build.sourcemap`), so its functions show as `Nn` or `Bt` and the heap
+snapshots' constructors are minified too (React's fibers show as `Li`).
+DOM nodes and React's state, closures and listeners all appear in heap
+snapshots, so they cover the app's own memory.
+
+For readable names, profile the development server:
+
+```sh
+pnpm --filter web-react dev
+```
+
+It serves http://localhost:5173 with React's development build, whose
+functions keep their names and which the
+[React Developer Tools](https://react.dev/learn/react-developer-tools)
+*Profiler* can time component by component; on the deployed production
+build the extension shows the component tree only. The development build
+runs extra checks, and `<StrictMode>` renders each component twice, so use
+it to find where time goes, not to compare timings with the canvas app.
+Submitting the form needs the backend at `127.0.0.1:50051`
+(`cargo run -p backend`), where the dev server proxies gRPC-web.
+
+### WebAssembly
+
+The tools work on the canvas app too, with less detail:
+
+- **CPU.** The Rust code shows in the Performance panel as
+  `wasm-function[209]` and the like: `wasm-pack build --release` runs
+  wasm-opt, which removes function names. The JavaScript bindings keep
+  theirs, such as `__wbg_set_font_…` and `__wbg_set_fillStyle_…`, which
+  shows which canvas calls take the time. To see the Rust names, build the
+  module without wasm-opt and serve the page yourself:
+
+  ```sh
+  make -C web-wasm build
+  cd web-wasm
+  wasm-pack build --target web --release --no-opt --no-typescript --no-pack --out-dir dist/pkg
+  python3 -m http.server -d dist 8090
+  ```
+
+  At http://localhost:8090 the frames then read, for example,
+  `web_wasm::text::break_opportunities`. This module is almost twice the
+  size of the deployed one and is not optimized by wasm-opt, so use it to
+  find where time goes, not for timings. Submitting fails there, as the
+  Python server does not proxy gRPC-web; typing, focus and painting work.
+  `make -C web-wasm build` puts the optimized module back.
+- **Memory.** Rust allocates in the module's linear memory, which Chrome
+  sees as one `ArrayBuffer`. A heap snapshot lists it as
+  `system / JSArrayBufferData` (about 1.2 MB once the form is painted),
+  and the compiled code as `(WasmNativeModule)`, but not the Rust values
+  inside, and allocation sampling records no Rust allocation. Linear
+  memory grows and never shrinks, so its size is the most the app has
+  needed. Its size now, from the console:
+
+  ```js
+  (await (await import('/pkg/web_wasm.js')).default()).memory.buffer.byteLength
+  ```
+
+  The bindings' `init` returns the running module when called again, so
+  this starts nothing new.
+- **The canvas.** Its pixel buffer covers the whole page, not just the
+  viewport, at the screen's resolution: page width × page height × the
+  device pixel ratio squared × 4 bytes, 16.7 MiB for a 1280 × 856 page
+  on a 2× screen. It is not in the JavaScript heap. With GPU raster,
+  Chrome keeps it, and copies of it, in GPU memory, which the Task
+  Manager's *GPU memory* column shows, not the memory footprint. With
+  software raster, it is in the tab's memory footprint.
+- **Idle CPU.** While an input is focused, the app repaints the canvas
+  every 500 ms to blink the caret (`BLINK_MS` in `web-wasm/src/web.rs`),
+  so the Performance monitor shows some CPU use while the page sits idle.
+  The React app leaves its caret to Chrome and runs no script then.
+
+### Measured
+
+Both apps were driven through the same steps in headless Chrome 156,
+against the Kind deployment, on an Intel Core i7-8750H with Linux and an
+NVIDIA GeForce GTX 1060, at 1280 × 800. Chrome was started with
+`--enable-gpu` for GPU raster and without it for software raster. Each
+run used a fresh browser. The CPU and memory tables give the median of
+5 runs per app, and the GPU memory table the range of 2 or 3 further
+runs. The steps were:
+
+1. Load the page, and wait 3 s after it is painted.
+2. Wait 10 s.
+3. Press Tab to focus the first field, and wait 10 s.
+4. Press Enter to submit the empty form, and wait 1 s.
+5. Type the four fields, 63 characters at 50 ms per key, with Tab between
+   them, then Tab and Space to check the terms.
+6. Press Enter to sign up through the backend, and wait 1 s.
+
+Main thread, script, layout and style times come from Chrome's
+`Performance.getMetrics`, the processes' CPU time from
+`SystemInfo.getProcessInfo` (in steps of 10 ms), private memory from
+`/proc/<pid>/smaps_rollup`, the JS heap after a garbage collection, and
+the GPU memory from a `memory-infra` memory dump. In a check run, the
+two apps' screens matched after steps 4 to 6, with at most 69 pixels
+differing, under the e2e tests' limit of 100.
+
+CPU time in milliseconds, React / WebAssembly, with GPU raster at 1×:
+
+| Step | Main thread | Script | Layout and style | Page's renderer process | GPU process |
+| --- | --- | --- | --- | --- | --- |
+| 1. Load | 73 / 64 | 37 / 24 | 3.6 / 0.5 | 120 / 100 | 70 / 60 |
+| 2. Idle | 0.3 / 1.9 | 0 / 0.3 | 0 / 0 | 0 / 0 | 20 / 20 |
+| 3. Idle, field focused | 5.7 / 24 | 0 / 16 | 0 / 0 | 10 / 40 | 50 / 100 |
+| 4. Empty submit | 6.2 / 8.3 | 3.1 / 5.6 | 0.6 / 0.1 | 10 / 20 | 10 / 10 |
+| 5. Typing | 130 / 178 | 27 / 117 | 11.6 / 0.4 | 220 / 290 | 180 / 410 |
+| 6. Sign-up | 12 / 10 | 5.1 / 5.5 | 1.8 / 0 | 10 / 10 | 10 / 20 |
+
+- **Loading costs about the same.** The canvas app runs less script
+  (24 ms against 37 ms for React's bundle and hydration) and no layout.
+- **Typing costs the canvas app more.** Every key repaints the whole
+  canvas from Rust: 4.3 times React's script time, 1.4 times its main
+  thread time, and 2.3 times its GPU process time. The React app spends
+  its time in Chrome's layout and style, which the canvas app skips.
+- **A focused field costs the canvas app CPU while idle.** The caret
+  blink runs 16 ms of script and doubles the GPU process time every 10 s.
+  React's caret, drawn by Chrome, runs no script.
+- **A 2× screen costs the canvas app more GPU process time, not React.**
+  At 2×, the GPU process time for steps 3 and 5 grows to 160 and 640 ms
+  for the canvas app, and stays at 60 and 190 ms for React. The other
+  times change by 20 ms at most.
+- **Without a GPU, the canvas app costs much more.** With software
+  raster, which headless Chrome and machines without a usable GPU use,
+  Chrome paints the canvas on the page's main thread. Typing then takes
+  700 ms of main thread time against React's 130 ms, and the page's
+  renderer process 810 ms against 230 ms. A focused field takes 96 ms
+  every 10 s against 5.6 ms.
+
+Memory, React / WebAssembly, with GPU raster, after loading and after
+signing up:
+
+| Measure | After loading | After signing up |
+| --- | --- | --- |
+| Page's renderer, private memory | 17.5 / 17.7 MiB | 19.8 / 21.1 MiB |
+| JS heap, used | 2.67 / 1.52 MiB | 3.27 / 1.64 MiB |
+| WebAssembly memory | – / 1.19 MiB | – / 1.19 MiB |
+| DOM nodes | 114 / 65 | 66 / 65 |
+| JS event listeners | 162 / 26 | 157 / 26 |
+
+GPU memory, React / WebAssembly, from the memory dump after typing a
+name:
+
+| Allocation | At 1× | At 2× |
+| --- | --- | --- |
+| Skia's GPU resources, in the GPU process | 8.5 / 52 MiB | 8.5 / 147 MiB |
+| Shared images, in the GPU process | 10–12 / 15–20 MiB | 10 / 53 MiB |
+| The canvas, in the page's renderer | – / 12.5–16.7 MiB | – / 50 MiB |
+
+These allocations can overlap, so they do not add up to a total.
+
+- **The canvas app's JavaScript side is no bigger.** Its JS heap and
+  WebAssembly memory together match React's JS heap after loading,
+  2.7 MiB, and are 2.8 MiB against 3.3 MiB after signing up; its
+  WebAssembly memory did not grow in these steps. It has a sixth of
+  React's event listeners, and 65 DOM nodes against React's 114 to 118
+  while the form shows.
+- **Its pixels cost GPU memory.** Skia's GPU resources are 6 times
+  React's at 1× and 17 times at 2×, where Chrome holds 50 MiB for a canvas
+  whose pixels take 16.7 MiB. Memory footprints hide this: the page's
+  renderer has only 1.3 MiB more private memory than React's.
+- **Without a GPU, the canvas is in the tab's memory.** With software
+  raster, the page's renderer has 22.7 MiB of private memory after loading
+  against React's 18.6 MiB. The 4.1 MiB difference is about the size of
+  the 1280 × 856 canvas at 1×, 4.2 MiB.
+
+These numbers come from one machine, with Chrome headless, and will
+differ elsewhere. Each difference called out above held in every run.
