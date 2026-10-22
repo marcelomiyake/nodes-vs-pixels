@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 
+use unicode_bidi::{BidiInfo, Level};
 use unicode_linebreak::{BreakClass, break_property, linebreaks};
 
 use crate::style::TextStyle;
@@ -39,19 +40,108 @@ pub trait Measure {
         text.chars().map(String::from).collect()
     }
 
-    /// The left and right edges of each character of `text` laid out on one
-    /// line, from where the text starts, in logical order: bidirectional
-    /// text places some runs right to left.
-    fn char_bounds(&self, text: &str, style: TextStyle) -> Vec<(f64, f64)> {
-        let mut prefix = String::new();
-        text.chars()
-            .map(|c| {
-                let left = self.width(&prefix, style);
-                prefix.push(c);
-                (left, self.width(&prefix, style))
-            })
-            .collect()
+    /// The left and right edges of each character of `text`, as
+    /// [`char_bounds`] places them; a measure may keep them for reuse.
+    fn char_bounds(&self, text: &str, style: TextStyle) -> Vec<(f64, f64)>
+    where
+        Self: Sized,
+    {
+        char_bounds(text, style, self)
     }
+}
+
+/// The left and right edges of each character of `text` laid out on one
+/// left-to-right line, from where the text starts, in logical order. The
+/// Unicode bidirectional algorithm orders the line's runs, and a
+/// right-to-left run places its characters from its right edge.
+#[must_use]
+pub fn char_bounds(text: &str, style: TextStyle, measure: &impl Measure) -> Vec<(f64, f64)> {
+    let info = BidiInfo::new(text, Some(Level::ltr()));
+    let mut bounds = Vec::new();
+    let mut placed = Vec::new();
+    let mut x = 0.0;
+    for paragraph in &info.paragraphs {
+        let (levels, runs) = info.visual_runs(paragraph, paragraph.range.clone());
+        for run in runs {
+            let piece = &text[run.clone()];
+            let width = measure.width(piece, style);
+            let rtl = levels[run.start].is_rtl();
+            for (start, end) in run_bounds(piece, width, style, measure) {
+                placed.push(if rtl {
+                    (x + width - end, x + width - start)
+                } else {
+                    (x + start, x + end)
+                });
+            }
+            bounds.push((run.start, std::mem::take(&mut placed)));
+            x += width;
+        }
+    }
+    // Runs come in visual order; the result follows the text.
+    bounds.sort_by_key(|&(start, _)| start);
+    bounds.into_iter().flat_map(|(_, run)| run).collect()
+}
+
+/// What a shaper draws a mark on when it has no letter to attach to.
+const DOTTED_CIRCLE: char = '\u{25CC}';
+
+/// How many grapheme clusters on either side of one shape it.
+const CONTEXT: usize = 2;
+
+/// Where each character of a single-direction run of `width` starts and
+/// ends, measured from the run's start in its own direction. The canvas
+/// only measures whole strings, so a grapheme cluster's advance is how much
+/// it widens the clusters beside it. Shaping mostly changes a letter with
+/// the one after it, as Arabic letters join and kerning pairs adjust, so a
+/// cluster is measured before the ones after it. A dependent mark, such as
+/// a vowel sign, changes with the letter before it instead, so it and the
+/// cluster before it are measured after their predecessors; alone, a mark
+/// is drawn on a dotted circle. The advances are scaled to the run's width,
+/// and every character of a cluster has the cluster's bounds, as in Chrome.
+/// Widths cannot tell where a shaper moves glyphs across clusters, as
+/// Myanmar's vowel sign E is drawn before its consonant, so carets in such
+/// text can be several pixels from Chrome's.
+fn run_bounds(
+    piece: &str,
+    width: f64,
+    style: TextStyle,
+    measure: &impl Measure,
+) -> Vec<(f64, f64)> {
+    let clusters = measure.graphemes(piece);
+    let dependent: Vec<bool> = clusters
+        .iter()
+        .map(|cluster| is_dependent(cluster, style, measure))
+        .collect();
+    let advances: Vec<f64> = (0..clusters.len())
+        .map(|index| {
+            let (before, after) = if dependent[index] || dependent.get(index + 1) == Some(&true) {
+                let before = clusters[index.saturating_sub(CONTEXT)..index].concat();
+                (format!("{before}{}", clusters[index]), before)
+            } else {
+                let end = (index + 1 + CONTEXT).min(clusters.len());
+                let after = clusters[index + 1..end].concat();
+                (format!("{}{after}", clusters[index]), after)
+            };
+            (measure.width(&before, style) - measure.width(&after, style)).max(0.0)
+        })
+        .collect();
+    let total: f64 = advances.iter().sum();
+    let scale = if total > 0.0 { width / total } else { 0.0 };
+    let mut bounds = Vec::new();
+    let mut start = 0.0;
+    for (cluster, advance) in clusters.iter().zip(advances) {
+        let end = start + advance * scale;
+        bounds.extend(cluster.chars().map(|_| (start, end)));
+        start = end;
+    }
+    bounds
+}
+
+/// Whether `cluster` is a mark that a shaper puts on a dotted circle when it
+/// stands alone.
+fn is_dependent(cluster: &str, style: TextStyle, measure: &impl Measure) -> bool {
+    let circled = format!("{DOTTED_CIRCLE}{cluster}");
+    (measure.width(cluster, style) - measure.width(&circled, style)).abs() < 0.5
 }
 
 /// The alphabetic baseline of a line box whose top edge is `line_top`.
@@ -567,9 +657,8 @@ pub mod testing {
     use crate::style::TextStyle;
 
     /// Every character is half the font size wide, spaceless scripts split
-    /// into three-character "words", combining diacritics join the
-    /// character before them, and text made only of Hebrew letters runs
-    /// right to left.
+    /// into three-character "words", and combining diacritics join the
+    /// character before them.
     pub struct FixedMeasure;
 
     impl Measure for FixedMeasure {
@@ -600,21 +689,6 @@ pub mod testing {
                 }
             }
             graphemes
-        }
-
-        fn char_bounds(&self, text: &str, style: TextStyle) -> Vec<(f64, f64)> {
-            let rtl =
-                !text.is_empty() && text.chars().all(|c| ('\u{5D0}'..='\u{5EA}').contains(&c));
-            let count = text.chars().count();
-            let advance = style.size / 2.0;
-            (0..count)
-                .map(|index| {
-                    let slot = if rtl { count - 1 - index } else { index };
-                    #[allow(clippy::cast_precision_loss)]
-                    let left = slot as f64 * advance;
-                    (left, left + advance)
-                })
-                .collect()
         }
     }
 }
@@ -737,6 +811,78 @@ mod tests {
         assert_eq!(
             min_content_width("a\u{a0}", text::SMALL, &FixedMeasure),
             14.0
+        );
+    }
+
+    #[test]
+    fn places_characters_in_bidirectional_order() {
+        // 16px BODY text: each character is 8px wide.
+        let bounds = |text: &str| char_bounds(text, text::BODY, &FixedMeasure);
+        assert_eq!(bounds(""), []);
+        assert_eq!(bounds("ab"), [(0.0, 8.0), (8.0, 16.0)]);
+        assert_eq!(bounds("אב"), [(8.0, 16.0), (0.0, 8.0)]);
+        // A left-to-right word, then a right-to-left one after the space.
+        assert_eq!(
+            bounds("a אב"),
+            [(0.0, 8.0), (8.0, 16.0), (24.0, 32.0), (16.0, 24.0)]
+        );
+        // Digits keep their order inside right-to-left text, which reverses
+        // around them, spaces included.
+        assert_eq!(
+            bounds("אב 12 גד"),
+            [
+                (56.0, 64.0),
+                (48.0, 56.0),
+                (40.0, 48.0),
+                (24.0, 32.0),
+                (32.0, 40.0),
+                (16.0, 24.0),
+                (8.0, 16.0),
+                (0.0, 8.0),
+            ]
+        );
+        // Each character of a cluster has the whole cluster's bounds.
+        assert_eq!(
+            bounds("e\u{301}x"),
+            [(0.0, 16.0), (0.0, 16.0), (16.0, 24.0)]
+        );
+    }
+
+    /// Shapes the ligature "لا" narrower than its first letter alone, and
+    /// the Myanmar vowel sign "ာ" on a dotted circle when alone.
+    struct Shaping;
+
+    impl Measure for Shaping {
+        fn width(&self, text: &str, _: TextStyle) -> f64 {
+            match text {
+                "لا" => 9.0,
+                "ل" => 12.0,
+                "ا" => 4.5,
+                "◌ا" => 6.0,
+                "မာ" => 18.0,
+                "မ" => 10.0,
+                "ာ" | "◌ာ" => 11.0,
+                _ => 0.0,
+            }
+        }
+
+        fn metrics(&self, _: TextStyle) -> FontMetrics {
+            FontMetrics {
+                ascent: 0.0,
+                descent: 0.0,
+            }
+        }
+    }
+
+    #[test]
+    fn places_shaped_clusters_by_the_text_beside_them() {
+        assert_eq!(
+            char_bounds("لا", text::BODY, &Shaping),
+            [(4.5, 9.0), (0.0, 4.5)]
+        );
+        assert_eq!(
+            char_bounds("မာ", text::BODY, &Shaping),
+            [(0.0, 10.0), (10.0, 18.0)]
         );
     }
 }

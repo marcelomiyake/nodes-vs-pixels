@@ -65,27 +65,11 @@ async fn run() -> Result<(), JsValue> {
         .ok_or("no 2d context")?
         .dyn_into()?;
     let elements = build_overlay(&document, &root)?;
-    // Lays out an input's text as the native control does, so the caret and
-    // selection land where they would in bidirectional text. Its empty,
-    // clipping container keeps long text from widening the page.
-    let clip = document.create_element("div")?;
-    clip.set_attribute("aria-hidden", "true")?;
-    clip.set_attribute(
-        "style",
-        "position:absolute;top:0;left:0;width:0;height:0;overflow:hidden",
-    )?;
-    let probe: HtmlElement = document.create_element("span")?.dyn_into()?;
-    probe.set_attribute(
-        "style",
-        "position:absolute;top:0;left:0;visibility:hidden;white-space:pre",
-    )?;
-    clip.append_child(&probe)?;
-    root.append_child(&clip)?;
     let hover = window
         .match_media("(hover: hover)")?
         .is_some_and(|query| query.matches());
     let browser = Browser {
-        measure: CanvasMeasure::new(context.clone(), document.clone(), probe),
+        measure: CanvasMeasure::new(context.clone()),
         window,
         document,
         root,
@@ -517,48 +501,35 @@ impl Painter for CanvasPainter<'_> {
     }
 }
 
-/// Measures with the canvas, which shapes text exactly as it paints it, and
-/// places carets with a hidden element that lays text out like an input.
+/// How many widths [`CanvasMeasure`] keeps; caret positions measure pieces
+/// of an input's value, so typing adds new ones.
+const CACHED_WIDTHS: usize = 4096;
+/// How many texts' character bounds [`CanvasMeasure`] keeps: enough for the
+/// inputs, so repainting an unchanged one, as the caret blinks, measures
+/// nothing.
+const CACHED_BOUNDS: usize = 8;
+
+type Bounds = ((String, String), Vec<(f64, f64)>);
+
+/// Measures with the canvas, which shapes text exactly as it paints it.
 struct CanvasMeasure {
     context: CanvasRenderingContext2d,
     widths: RefCell<HashMap<(String, String), f64>>,
+    /// The most recently placed texts last.
+    bounds: RefCell<Vec<Bounds>>,
     words: Option<Intl::Segmenter>,
     graphemes: Option<Intl::Segmenter>,
-    document: Document,
-    probe: HtmlElement,
 }
 
 impl CanvasMeasure {
-    fn new(context: CanvasRenderingContext2d, document: Document, probe: HtmlElement) -> Self {
+    fn new(context: CanvasRenderingContext2d) -> Self {
         Self {
             context,
             widths: RefCell::default(),
+            bounds: RefCell::default(),
             words: segmenter("word"),
             graphemes: segmenter("grapheme"),
-            document,
-            probe,
         }
-    }
-
-    fn probe_bounds(&self, text: &str, style: TextStyle) -> Result<Vec<(f64, f64)>, JsValue> {
-        self.probe.style().set_property("font", &css_font(style))?;
-        self.probe.set_text_content(Some(text));
-        let Some(node) = self.probe.first_child() else {
-            return Ok(Vec::new());
-        };
-        let left = self.probe.get_bounding_client_rect().left();
-        let range = self.document.create_range()?;
-        let mut offset = 0;
-        text.chars()
-            .map(|c| {
-                let units = u32::try_from(c.len_utf16()).unwrap_or(2);
-                range.set_start(&node, offset)?;
-                range.set_end(&node, offset + units)?;
-                offset += units;
-                let rect = range.get_bounding_client_rect();
-                Ok((rect.left() - left, rect.right() - left))
-            })
-            .collect()
     }
 }
 
@@ -594,7 +565,11 @@ impl Measure for CanvasMeasure {
             .context
             .measure_text(text)
             .map_or(0.0, |metrics| metrics.width());
-        self.widths.borrow_mut().insert(key, width);
+        let mut widths = self.widths.borrow_mut();
+        if widths.len() >= CACHED_WIDTHS {
+            widths.clear();
+        }
+        widths.insert(key, width);
         width
     }
 
@@ -625,6 +600,21 @@ impl Measure for CanvasMeasure {
     }
 
     fn char_bounds(&self, text: &str, style: TextStyle) -> Vec<(f64, f64)> {
-        self.probe_bounds(text, style).unwrap_or_default()
+        let key = (style.font(), text.to_owned());
+        if let Some((_, bounds)) = self
+            .bounds
+            .borrow()
+            .iter()
+            .find(|(cached, _)| *cached == key)
+        {
+            return bounds.clone();
+        }
+        let bounds = crate::text::char_bounds(text, style, self);
+        let mut cache = self.bounds.borrow_mut();
+        if cache.len() >= CACHED_BOUNDS {
+            cache.remove(0);
+        }
+        cache.push((key, bounds.clone()));
+        bounds
     }
 }
