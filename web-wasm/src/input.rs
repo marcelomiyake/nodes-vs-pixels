@@ -10,6 +10,7 @@ use form_core::Field;
 use crate::editing::{Editor, InputText, Motion, content_box, single_line};
 use crate::form::{FormState, Status, Submission};
 use crate::grpc_web::CallError;
+use crate::history::{Edit, History, Snapshot};
 use crate::layout::{Content, Layout, Rect};
 use crate::proto::{SignUpRequest, SignUpResponse};
 use crate::scene::{Control, Interaction};
@@ -193,6 +194,11 @@ pub struct App {
     focus_visible: bool,
     caret_visible: bool,
     editors: HashMap<Field, Editor>,
+    history: History,
+    /// The text input that last had focus, which Chrome's selection stays
+    /// in while the checkbox or the button has focus: undoing its edits
+    /// leaves focus where it is.
+    last_input: Option<Field>,
     pointer: Option<(f64, f64)>,
     mouse: Mouse,
     /// Where on the page the last click on no control was: Tab continues
@@ -268,7 +274,7 @@ impl App {
             Event::Cut => self.copy(true, page, measure),
             Event::Paste(text) => match self.editing() {
                 Some(field) => self.edit(field, page, measure, |editor, text_now| {
-                    Some(editor.replace(text_now, &single_line(&text)))
+                    Some((Edit::Replace, editor.replace(text_now, &single_line(&text))))
                 }),
                 None => Outcome::default(),
             },
@@ -369,6 +375,12 @@ impl App {
             return;
         }
         self.space = None;
+        self.history.close();
+        if let Some(Control::Field(field)) = control
+            && field != Field::AcceptTerms
+        {
+            self.last_input = Some(field);
+        }
         if let Some(Control::Field(field)) = self.focus {
             self.state.blur(field);
             self.editors.entry(field).or_default().scroll = 0.0;
@@ -438,6 +450,9 @@ impl App {
                 effect: None,
             };
         }
+        if let Some(redo) = self.undo_key(key) {
+            return self.undo(redo, page, measure);
+        }
         let enter = key.key == "Enter";
         let space = key.key == " ";
         match self.focus.filter(|_| self.canvas == Canvas::Focused) {
@@ -453,6 +468,66 @@ impl App {
                 self.edit_key(field, key, page, measure)
             }
             _ => Outcome::default(),
+        }
+    }
+
+    /// Whether `key` undoes, `Some(false)`, or redoes, `Some(true)`, with
+    /// Chrome's shortcuts: Ctrl+Y redoes too outside macOS.
+    fn undo_key(&self, key: &Key) -> Option<bool> {
+        let command = if self.device.mac {
+            key.meta && !key.ctrl
+        } else {
+            key.ctrl && !key.meta
+        };
+        if !command || key.alt {
+            return None;
+        }
+        match key.key.as_str() {
+            "z" | "Z" => Some(key.shift),
+            "y" if !self.device.mac && !key.shift => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Undoes, or redoes, the last step of the page's history, which may be
+    /// in another input. Redoing focuses the input, and so does undoing,
+    /// unless it was the last input to have focus, as in Chrome.
+    fn undo(&mut self, redo: bool, page: &Layout, measure: &impl Measure) -> Outcome {
+        // The form is read-only while it submits, and gone after.
+        if matches!(self.state.status(), Status::Submitting | Status::Success) {
+            return Outcome::handled();
+        }
+        let snapshot = if redo {
+            self.history.redo()
+        } else {
+            self.history.undo()
+        };
+        let Some(Snapshot {
+            field,
+            text,
+            anchor,
+            head,
+        }) = snapshot
+        else {
+            return Outcome::handled();
+        };
+        self.state.set_text(field, &text);
+        if redo || self.last_input != Some(field) {
+            self.focus_on(Some(Control::Field(field)));
+        }
+        let mut editor = self.editor(field);
+        (editor.anchor, editor.head) = (anchor, head);
+        if self.focus == Some(Control::Field(field)) {
+            editor.reveal(
+                &InputText::new(field, &text, measure),
+                content_width(page, field),
+            );
+        }
+        self.editors.insert(field, editor);
+        Outcome {
+            handled: true,
+            blink: true,
+            effect: None,
         }
     }
 
@@ -559,7 +634,12 @@ impl App {
         match key.key.as_str() {
             "a" | "A" if command && !key.alt => {
                 let text = InputText::new(field, self.state.text(field), measure);
-                self.editors.entry(field).or_default().select(0..text.len());
+                let editor = self.editors.entry(field).or_default();
+                let before = *editor;
+                editor.select(0..text.len());
+                if *editor != before {
+                    self.history.close();
+                }
                 Outcome::handled()
             }
             "Backspace" | "Delete" => {
@@ -574,11 +654,18 @@ impl App {
                         };
                         editor.go(text, motion, true);
                     }
-                    editor.delete(text, forward, word)
+                    let edit = if forward {
+                        Edit::Delete
+                    } else {
+                        Edit::Backspace
+                    };
+                    editor
+                        .delete(text, forward, word)
+                        .map(|value| (edit, value))
                 })
             }
             typed if self.inserts(key) => self.edit(field, page, measure, |editor, text| {
-                Some(editor.replace(text, typed))
+                Some((Edit::Type, editor.replace(text, typed)))
             }),
             _ => Outcome::default(),
         }
@@ -601,16 +688,23 @@ impl App {
         field: Field,
         page: &Layout,
         measure: &impl Measure,
-        change: impl FnOnce(&mut Editor, &InputText) -> Option<String>,
+        change: impl FnOnce(&mut Editor, &InputText) -> Option<(Edit, String)>,
     ) -> Outcome {
         let mut text = InputText::new(field, self.state.text(field), measure);
-        let mut editor = self.editor(field);
-        if let Some(value) = change(&mut editor, &text) {
+        let before = self.editor(field);
+        let mut editor = before;
+        if let Some((edit, value)) = change(&mut editor, &text) {
+            let old = self.state.text(field).to_owned();
             // A read-only input, while the form submits, keeps its value.
             if !self.state.set_text(field, &value) {
                 return Outcome::handled();
             }
             text = InputText::new(field, &value, measure);
+            let (before, after) = (snapshot(field, old, before), snapshot(field, value, editor));
+            self.history.record(edit, before, after);
+        } else if (editor.anchor, editor.head) != (before.anchor, before.head) {
+            // Moving the selection ends the typing in a row.
+            self.history.close();
         }
         editor.reveal(&text, content_width(page, field));
         self.editors.insert(field, editor);
@@ -671,6 +765,10 @@ impl App {
         let Some((field, editor)) = dragged else {
             return Outcome::default();
         };
+        let before = self.editor(field);
+        if (editor.anchor, editor.head) != (before.anchor, before.head) {
+            self.history.close();
+        }
         self.editors.insert(field, editor);
         Outcome {
             handled: true,
@@ -752,9 +850,11 @@ impl App {
                 self.focus_on(Some(Control::Button));
                 Outcome::default()
             }
-            // Nothing that takes focus: the focused control loses it.
+            // Nothing that takes focus: the focused control loses it, and
+            // Chrome's selection leaves the last input.
             _ => {
                 self.focus_on(None);
+                self.last_input = None;
                 self.start = Some(at.1);
                 Outcome::default()
             }
@@ -851,7 +951,9 @@ impl App {
         }
         let mut outcome = if cut {
             self.edit(field, page, measure, |editor, text| {
-                editor.delete(text, false, false)
+                editor
+                    .delete(text, false, false)
+                    .map(|value| (Edit::Replace, value))
             })
         } else {
             Outcome::handled()
@@ -898,6 +1000,15 @@ fn hit(page: &Layout, at: (f64, f64), measure: &impl Measure) -> Option<Target> 
 
 fn inside(rect: Rect, (x, y): (f64, f64)) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.bottom()
+}
+
+const fn snapshot(field: Field, text: String, editor: Editor) -> Snapshot {
+    Snapshot {
+        field,
+        text,
+        anchor: editor.anchor,
+        head: editor.head,
+    }
 }
 
 fn input_of(page: &Layout, field: Field) -> Rect {
@@ -1586,6 +1697,72 @@ mod tests {
             send(&mut app, Event::Paste("x".to_owned())),
             Outcome::default()
         );
+    }
+
+    #[test]
+    fn undo_and_redo_go_through_the_page_s_edits() {
+        let mut app = focused();
+        let undo = |app: &mut App| press(app, "z", |key| key.ctrl = true);
+        let redo = |app: &mut App| {
+            press(app, "Z", |key| {
+                key.ctrl = true;
+                key.shift = true;
+            })
+        };
+        let name = |app: &App| (app.state.text(Field::FullName).to_owned(), selection(app));
+        // Moving the caret ends the typing in a row.
+        type_text(&mut app, "Ada");
+        key(&mut app, "ArrowLeft");
+        type_text(&mut app, "n");
+        assert!(undo(&mut app).handled);
+        assert_eq!(name(&app), ("Ada".to_owned(), (2, 2)));
+        redo(&mut app);
+        key(&mut app, "Tab");
+        type_text(&mut app, "ada@x.io");
+        undo(&mut app);
+        assert_eq!(app.state.text(Field::Email), "");
+        // The step before is in another input, which takes focus.
+        undo(&mut app);
+        assert_eq!(focus(&app), Some(Control::Field(Field::FullName)));
+        assert_eq!(name(&app), ("Ada".to_owned(), (2, 2)));
+        press(&mut app, "y", |key| key.ctrl = true);
+        assert_eq!(name(&app), ("Adna".to_owned(), (3, 3)));
+        // Chrome's selection stays in the last input while the checkbox has
+        // focus, so undoing its edit leaves focus there.
+        for _ in 0..3 {
+            key(&mut app, "Tab");
+        }
+        type_text(&mut app, "x");
+        key(&mut app, "Tab");
+        undo(&mut app);
+        assert_eq!(app.state.text(Field::ConfirmPassword), "");
+        assert_eq!(focus(&app), Some(Control::Field(Field::AcceptTerms)));
+        // Redoing focuses it anyway.
+        redo(&mut app);
+        assert_eq!(focus(&app), Some(Control::Field(Field::ConfirmPassword)));
+        // A click on the page takes the selection out of it.
+        click(&mut app, (1.0, 1.0));
+        undo(&mut app);
+        assert_eq!(focus(&app), Some(Control::Field(Field::ConfirmPassword)));
+        // Nothing changes while the form submits.
+        fill(&mut app);
+        key(&mut app, "Enter");
+        undo(&mut app);
+        assert_eq!(app.state.text(Field::FullName), "Ada Lovelace");
+
+        let mut mac = App::new(Device {
+            mac: true,
+            hover: true,
+        });
+        send(&mut mac, Event::Focus);
+        type_text(&mut mac, "a");
+        press(&mut mac, "z", |key| key.meta = true);
+        assert_eq!(mac.state.text(Field::FullName), "");
+        press(&mut mac, "z", |key| {
+            key.meta = true;
+            key.shift = true;
+        });
+        assert_eq!(mac.state.text(Field::FullName), "a");
     }
 
     #[test]
