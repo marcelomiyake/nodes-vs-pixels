@@ -1,5 +1,5 @@
 //! Input on the canvas, independent of the browser. The canvas is the only
-//! element that takes focus; keys and the clipboard move
+//! element that takes focus; keys, mouse buttons and the clipboard move
 //! focus between the controls it paints, edit the focused input and submit
 //! the form, as Chrome's native controls do in the React app.
 
@@ -39,11 +39,28 @@ pub enum Event {
     /// A key came up. The page also sees the release of a key pressed in the
     /// browser's own controls, such as the Tab that brought focus in.
     KeyUp(Key),
+    /// The main mouse button went down at a point of the page; `clicks`
+    /// counts the clicks of a double or triple click.
+    Press {
+        x: f64,
+        y: f64,
+        shift: bool,
+        clicks: u32,
+    },
+    /// The mouse button came up at a point of the page.
+    Release {
+        x: f64,
+        y: f64,
+    },
+    /// The pointer moved to a point of the page, or left it.
+    Pointer(Option<(f64, f64)>),
     Copy,
     Cut,
     Paste(String),
     /// The caret blink timer fired.
     Blink,
+    /// An animation frame came while [`App::autoscrolling`].
+    Autoscroll,
     /// The viewport changed size, so only the layout needs updating.
     Resize,
     Response(Result<SignUpResponse, CallError>),
@@ -80,11 +97,52 @@ impl Outcome {
     }
 }
 
+/// How far either side of the pointer a selection drag scrolls its input
+/// into view, on each animation frame, as Chrome's autoscroll does.
+const AUTOSCROLL_MARGIN: f64 = 20.0;
+
+/// What the pointer is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Input(Field),
+    /// A field's label; the terms label toggles the checkbox.
+    Label(Field),
+    Check,
+    Button,
+}
+
 /// What the device the page runs on can do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Device {
     /// Whether this is macOS, whose shortcuts use Option and Command.
     pub mac: bool,
+    /// Whether the pointer can hover, so the button shows it.
+    pub hover: bool,
+}
+
+/// The main mouse button.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Mouse {
+    #[default]
+    Up,
+    /// Down on a target, or on nothing.
+    Down(Option<Target>),
+    /// Down on an input, so moving the pointer extends its selection.
+    Selecting(Field),
+    /// Down on an input after a double click selected a word, from its start
+    /// to its end, so moving the pointer extends the selection by words.
+    Words(Field, usize, usize),
+}
+
+impl Mouse {
+    /// What the button went down on.
+    const fn target(self) -> Option<Target> {
+        match self {
+            Self::Up => None,
+            Self::Down(target) => target,
+            Self::Selecting(field) | Self::Words(field, ..) => Some(Target::Input(field)),
+        }
+    }
 }
 
 /// Where the page's focus is, as the canvas holds it.
@@ -93,7 +151,8 @@ enum Canvas {
     /// Outside the page, in the browser's own controls, or never in it yet.
     #[default]
     Outside,
-    /// On the canvas, in a window in the background.
+    /// On the canvas, in a window in the background. The canvas keeps it
+    /// after a click on no control too.
     Background,
     /// On the canvas, which has focus.
     Focused,
@@ -134,6 +193,11 @@ pub struct App {
     focus_visible: bool,
     caret_visible: bool,
     editors: HashMap<Field, Editor>,
+    pointer: Option<(f64, f64)>,
+    mouse: Mouse,
+    /// Where on the page the last click on no control was: Tab continues
+    /// from there, as from Chrome's sequential focus navigation start point.
+    start: Option<f64>,
 }
 
 impl App {
@@ -150,18 +214,21 @@ impl App {
         let mut outcome = match event {
             Event::Focus => {
                 self.entering = None;
-                // Tab or a script bring focus into the page at its first
-                // control, and the window regaining focus brings it back.
-                if self.canvas != Canvas::Outside || self.focus.is_some() {
-                    self.entering = Some(Entering::Back { shift: false });
-                } else {
-                    self.focus_visible = true;
-                    let editors = self.editors.clone();
-                    self.tab(page, measure, false);
-                    self.entering = Some(Entering::First {
-                        editors,
-                        shift: false,
-                    });
+                // Not from a click: Tab or a script bring focus into the page
+                // at its first control, and the window regaining focus brings
+                // it back.
+                if self.mouse == Mouse::Up {
+                    if self.canvas != Canvas::Outside || self.focus.is_some() {
+                        self.entering = Some(Entering::Back { shift: false });
+                    } else {
+                        self.focus_visible = true;
+                        let editors = self.editors.clone();
+                        self.tab(page, measure, false);
+                        self.entering = Some(Entering::First {
+                            editors,
+                            shift: false,
+                        });
+                    }
                 }
                 self.canvas = Canvas::Focused;
                 // The caret shows at once.
@@ -176,6 +243,8 @@ impl App {
                 }
                 self.entering = None;
                 self.space = None;
+                // The release of a button outside the window never comes.
+                self.mouse = Mouse::Up;
                 if let Some(Control::Field(field)) = self.focus {
                     self.state.blur(field);
                 }
@@ -183,6 +252,18 @@ impl App {
             }
             Event::Key(key) => self.key(&key, page, measure),
             Event::KeyUp(key) => self.key_up(&key, page, measure),
+            Event::Press {
+                x,
+                y,
+                shift,
+                clicks,
+            } => self.press((x, y), shift, clicks, page, measure),
+            Event::Release { x, y } => self.release((x, y), page, measure),
+            Event::Pointer(at) => {
+                self.pointer = at;
+                let dragged = self.dragged(page, measure);
+                self.drag(dragged.map(|(field, _, editor)| (field, editor)))
+            }
             Event::Copy => self.copy(false, page, measure),
             Event::Cut => self.copy(true, page, measure),
             Event::Paste(text) => match self.editing() {
@@ -194,6 +275,10 @@ impl App {
             Event::Blink => {
                 self.caret_visible = !self.caret_visible;
                 Outcome::default()
+            }
+            Event::Autoscroll => {
+                let scrolled = self.autoscroll(page, measure);
+                self.drag(scrolled)
             }
             Event::Resize => Outcome::default(),
             Event::Response(result) => self.respond(result, page, measure),
@@ -209,20 +294,40 @@ impl App {
 
     /// What painting needs to know.
     #[must_use]
-    pub fn interaction(&self) -> Interaction {
+    pub fn interaction(&self, page: &Layout) -> Interaction {
         let focus = self.focus.filter(|_| self.canvas == Canvas::Focused);
         let editor = self
             .editing()
             .map(|field| self.editor(field))
             .unwrap_or_default();
         let range = editor.range();
+        let button = match &page.content {
+            Content::Form(form) => Some(form.button),
+            Content::Success(_) => None,
+        };
         Interaction {
             focus,
             focus_visible: self.focus_visible,
-            hovered: false,
+            hovered: self.device.hover
+                && self
+                    .pointer
+                    .zip(button)
+                    .is_some_and(|(at, rect)| inside(rect, at)),
             caret_visible: self.caret_visible,
             scroll_left: editor.scroll,
             selection: (range.start, range.end),
+        }
+    }
+
+    /// The mouse cursor over the canvas, as the React app's elements set it.
+    #[must_use]
+    pub fn cursor(&self, page: &Layout, measure: &impl Measure) -> &'static str {
+        let target = self.pointer.and_then(|at| hit(page, at, measure));
+        match target {
+            _ if matches!(self.mouse, Mouse::Selecting(_) | Mouse::Words(..)) => "text",
+            Some(Target::Input(_)) => "text",
+            Some(Target::Button) if self.state.status() == Status::Submitting => "wait",
+            _ => "default",
         }
     }
 
@@ -289,11 +394,15 @@ impl App {
             .focus
             .or(self.resume.take())
             .and_then(|focus| controls.iter().position(|&(control, _)| control == focus));
-        let next = match current {
-            Some(index) if backward => index.checked_sub(1),
-            Some(index) => Some(index + 1),
-            None if backward => controls.len().checked_sub(1),
-            None => Some(0),
+        let next = match (current, self.start.take()) {
+            (Some(index), _) if backward => index.checked_sub(1),
+            (Some(index), _) => Some(index + 1),
+            (None, Some(y)) if backward => {
+                controls.iter().rposition(|(_, rect)| rect.bottom() <= y)
+            }
+            (None, Some(y)) => controls.iter().position(|(_, rect)| rect.y >= y),
+            (None, None) if backward => controls.len().checked_sub(1),
+            (None, None) => Some(0),
         };
         let Some(&(control, _)) = next.and_then(|index| controls.get(index)) else {
             self.focus_on(None);
@@ -316,8 +425,11 @@ impl App {
 
     fn key(&mut self, key: &Key, page: &Layout, measure: &impl Measure) -> Outcome {
         self.entering = None;
-        // Keyboard use makes the focused control match `:focus-visible`.
-        self.focus_visible = true;
+        // Keyboard use makes the focused control match `:focus-visible`, but
+        // not shortcuts with Ctrl, Alt or the Command key.
+        if !(key.ctrl || key.alt || key.meta) {
+            self.focus_visible = true;
+        }
         if key.key == "Tab" && !(key.ctrl || key.alt || key.meta) {
             let handled = self.tab(page, measure, key.shift);
             return Outcome {
@@ -396,6 +508,7 @@ impl App {
             _ => return Outcome::default(),
         }
         self.focus_visible = true;
+        self.start = None;
         let blink = self.tab(page, measure, backward);
         Outcome {
             handled: false,
@@ -508,6 +621,173 @@ impl App {
         }
     }
 
+    /// Puts the caret of `field` where `x` is on the page.
+    fn place(
+        &mut self,
+        field: Field,
+        x: f64,
+        extend: bool,
+        page: &Layout,
+        measure: &impl Measure,
+    ) -> Outcome {
+        let at = x - content_x(page, field) + self.editor(field).scroll;
+        self.edit(field, page, measure, |editor, text| {
+            editor.place(text.offset_at(at), extend);
+            None
+        })
+    }
+
+    /// The dragged input, its text, and its selection extended to the
+    /// pointer, by words after a double click.
+    fn dragged(&self, page: &Layout, measure: &impl Measure) -> Option<(Field, InputText, Editor)> {
+        let field = match self.mouse {
+            Mouse::Selecting(field) | Mouse::Words(field, ..)
+                if self.focus == Some(Control::Field(field)) =>
+            {
+                field
+            }
+            _ => return None,
+        };
+        let (x, _) = self.pointer?;
+        let text = InputText::new(field, self.state.text(field), measure);
+        let mut editor = self.editor(field);
+        let at = x - content_x(page, field) + editor.scroll;
+        if let Mouse::Words(_, start, end) = self.mouse {
+            let under = text.word_at(at);
+            (editor.anchor, editor.head) = if under.start < start {
+                (end, under.start)
+            } else {
+                (start, under.end.max(end))
+            };
+        } else {
+            editor.place(text.offset_at(at), true);
+        }
+        Some((field, text, editor))
+    }
+
+    /// Puts a dragged selection in place. Only the autoscroll scrolls the
+    /// input, as in Chrome.
+    fn drag(&mut self, dragged: Option<(Field, Editor)>) -> Outcome {
+        let Some((field, editor)) = dragged else {
+            return Outcome::default();
+        };
+        self.editors.insert(field, editor);
+        Outcome {
+            handled: true,
+            blink: true,
+            effect: None,
+        }
+    }
+
+    /// Whether a selection drag holds the pointer near or past its input's
+    /// sides, where the input can still scroll, so that each animation frame
+    /// must bring an [`Event::Autoscroll`].
+    #[must_use]
+    pub fn autoscrolling(&self, page: &Layout, measure: &impl Measure) -> bool {
+        self.autoscroll(page, measure).is_some()
+    }
+
+    /// The dragged input with its selection and scroll after the next
+    /// animation frame, unless they stay: the selection follows the pointer,
+    /// then the input scrolls the least that shows [`AUTOSCROLL_MARGIN`]
+    /// either side of the pointer.
+    fn autoscroll(&self, page: &Layout, measure: &impl Measure) -> Option<(Field, Editor)> {
+        let (field, text, mut editor) = self.dragged(page, measure)?;
+        let (x, _) = self.pointer?;
+        let content = content_box(input_of(page, field));
+        // The pointer covers the pixel from `x` to `x + 1`.
+        let step = (x - AUTOSCROLL_MARGIN - content.x).floor().min(0.0)
+            + (x + 1.0 + AUTOSCROLL_MARGIN - (content.x + content.width))
+                .ceil()
+                .max(0.0);
+        editor.scroll_by(&text, content.width, step);
+        (editor != self.editor(field)).then_some((field, editor))
+    }
+
+    fn press(
+        &mut self,
+        at: (f64, f64),
+        shift: bool,
+        clicks: u32,
+        page: &Layout,
+        measure: &impl Measure,
+    ) -> Outcome {
+        self.pointer = Some(at);
+        self.focus_visible = false;
+        self.entering = None;
+        let target = hit(page, at, measure);
+        self.mouse = Mouse::Down(target);
+        let submitting = self.state.status() == Status::Submitting;
+        match target {
+            Some(Target::Input(field)) => {
+                let extend = shift && self.focus == Some(Control::Field(field));
+                self.focus_on(Some(Control::Field(field)));
+                if clicks == 1 {
+                    self.mouse = Mouse::Selecting(field);
+                }
+                let x = at.0 - content_x(page, field) + self.editor(field).scroll;
+                match clicks {
+                    0 | 1 => self.place(field, at.0, extend, page, measure),
+                    2 => {
+                        let mut word = 0..0;
+                        let outcome = self.edit(field, page, measure, |editor, text| {
+                            word = text.word_at(x);
+                            editor.select(word.clone());
+                            None
+                        });
+                        self.mouse = Mouse::Words(field, word.start, word.end);
+                        outcome
+                    }
+                    _ => self.edit(field, page, measure, |editor, text| {
+                        editor.select(0..text.len());
+                        None
+                    }),
+                }
+            }
+            Some(Target::Check) => {
+                self.focus_on(Some(Control::Field(Field::AcceptTerms)));
+                Outcome::default()
+            }
+            Some(Target::Button) if !submitting => {
+                self.focus_on(Some(Control::Button));
+                Outcome::default()
+            }
+            // Nothing that takes focus: the focused control loses it.
+            _ => {
+                self.focus_on(None);
+                self.start = Some(at.1);
+                Outcome::default()
+            }
+        }
+    }
+
+    /// Ends a press: a click when it ends where it began.
+    fn release(&mut self, at: (f64, f64), page: &Layout, measure: &impl Measure) -> Outcome {
+        self.pointer = Some(at);
+        let pressed = std::mem::take(&mut self.mouse).target();
+        let target = hit(page, at, measure);
+        if pressed != target {
+            return Outcome::default();
+        }
+        match target {
+            Some(Target::Check | Target::Label(Field::AcceptTerms)) => {
+                self.focus_on(Some(Control::Field(Field::AcceptTerms)));
+                self.state
+                    .set_accept_terms(!self.state.values().accept_terms);
+                Outcome::default()
+            }
+            Some(Target::Label(field)) => {
+                self.focus_field(field, page, measure);
+                Outcome {
+                    blink: true,
+                    ..Outcome::default()
+                }
+            }
+            Some(Target::Button) => self.submit(page, measure),
+            _ => Outcome::default(),
+        }
+    }
+
     fn submit(&mut self, page: &Layout, measure: &impl Measure) -> Outcome {
         // The disabled button blocks submission while one is pending.
         if self.state.locked() {
@@ -581,6 +861,45 @@ impl App {
     }
 }
 
+/// The control, or label, at a point of the page.
+fn hit(page: &Layout, at: (f64, f64), measure: &impl Measure) -> Option<Target> {
+    let Content::Form(form) = &page.content else {
+        return None;
+    };
+    for field in &form.fields {
+        if inside(field.input, at) {
+            return Some(Target::Input(field.field));
+        }
+        if inside(field.label.rect, at) {
+            return Some(Target::Label(field.field));
+        }
+    }
+    let terms = &form.terms;
+    // The terms label is as wide as its text, or its column once it wraps.
+    let label = &terms.label;
+    let width = match label.lines.as_slice() {
+        [line] => measure.width(line, label.style),
+        _ => label.rect.width,
+    };
+    if inside(
+        Rect {
+            width,
+            ..label.rect
+        },
+        at,
+    ) {
+        return Some(Target::Label(Field::AcceptTerms));
+    }
+    if inside(terms.check, at) {
+        return Some(Target::Check);
+    }
+    inside(form.button, at).then_some(Target::Button)
+}
+
+fn inside(rect: Rect, (x, y): (f64, f64)) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.bottom()
+}
+
 fn input_of(page: &Layout, field: Field) -> Rect {
     match &page.content {
         Content::Form(form) => form
@@ -592,6 +911,10 @@ fn input_of(page: &Layout, field: Field) -> Rect {
     }
 }
 
+fn content_x(page: &Layout, field: Field) -> f64 {
+    content_box(input_of(page, field)).x
+}
+
 fn content_width(page: &Layout, field: Field) -> f64 {
     content_box(input_of(page, field)).width
 }
@@ -599,8 +922,10 @@ fn content_width(page: &Layout, field: Field) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{Viewport, layout};
+    use crate::layout::{FormLayout, Viewport, layout};
     use crate::proto;
+    use crate::style::TextStyle;
+    use crate::text::FontMetrics;
     use crate::text::testing::FixedMeasure;
 
     const DESKTOP: Viewport = Viewport {
@@ -609,8 +934,20 @@ mod tests {
         media_width: 1280.0,
     };
 
+    const DESKTOP_MOUSE: Device = Device {
+        mac: false,
+        hover: true,
+    };
+
     fn page(app: &App) -> Layout {
         layout(DESKTOP, &app.state, &FixedMeasure)
+    }
+
+    fn form(app: &App) -> FormLayout {
+        match page(app).content {
+            Content::Form(form) => *form,
+            Content::Success(_) => panic!("expected the form"),
+        }
     }
 
     fn send(app: &mut App, event: Event) -> Outcome {
@@ -637,17 +974,44 @@ mod tests {
         }
     }
 
+    fn center(rect: Rect) -> (f64, f64) {
+        (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+    }
+
+    fn click_with(app: &mut App, (x, y): (f64, f64), clicks: u32) -> Outcome {
+        let pressed = send(
+            app,
+            Event::Press {
+                x,
+                y,
+                shift: false,
+                clicks,
+            },
+        );
+        send(app, Event::Focus);
+        let released = send(app, Event::Release { x, y });
+        if released.effect.is_some() {
+            released
+        } else {
+            pressed
+        }
+    }
+
+    fn click(app: &mut App, at: (f64, f64)) -> Outcome {
+        click_with(app, at, 1)
+    }
+
     fn focus(app: &App) -> Option<Control> {
-        app.interaction().focus
+        app.interaction(&page(app)).focus
     }
 
     fn selection(app: &App) -> (usize, usize) {
-        app.interaction().selection
+        app.interaction(&page(app)).selection
     }
 
     /// An app whose canvas has focus in the full name input.
     fn focused() -> App {
-        let mut app = App::new(Device::default());
+        let mut app = App::new(DESKTOP_MOUSE);
         send(&mut app, Event::Focus);
         app
     }
@@ -679,7 +1043,7 @@ mod tests {
     fn tab_moves_through_the_controls_and_out_of_the_page() {
         let mut app = focused();
         assert_eq!(focus(&app), Some(Control::Field(Field::FullName)));
-        assert!(app.interaction().focus_visible);
+        assert!(app.interaction(&page(&app)).focus_visible);
         for expected in [
             Control::Field(Field::Email),
             Control::Field(Field::Password),
@@ -714,7 +1078,7 @@ mod tests {
 
     #[test]
     fn tab_from_the_browser_enters_the_page_from_its_side() {
-        let mut app = App::new(Device::default());
+        let mut app = App::new(DESKTOP_MOUSE);
         app.state.set_text(Field::FullName, "Ada");
         // Focus comes in at the first control, until the key that brought it
         // comes up: Shift+Tab enters at the last.
@@ -812,7 +1176,10 @@ mod tests {
 
     #[test]
     fn macos_moves_with_option_and_command() {
-        let mut app = App::new(Device { mac: true });
+        let mut app = App::new(Device {
+            mac: true,
+            hover: true,
+        });
         send(&mut app, Event::Focus);
         type_text(&mut app, "ab cd");
         press(&mut app, "é", |key| key.alt = true);
@@ -923,6 +1290,278 @@ mod tests {
     }
 
     #[test]
+    fn clicks_place_the_caret_and_select() {
+        let mut app = focused();
+        type_text(&mut app, "Ada Lovelace");
+        let input = form(&app).fields[0].input;
+        let content = content_box(input);
+        // 16px BODY text: each character is 8px wide.
+        click(&mut app, (content.x + 13.0, input.y + 10.0));
+        assert_eq!(selection(&app), (2, 2));
+        assert!(!app.interaction(&page(&app)).focus_visible);
+        send(
+            &mut app,
+            Event::Press {
+                x: content.x + 30.0,
+                y: input.y + 10.0,
+                shift: false,
+                clicks: 1,
+            },
+        );
+        send(
+            &mut app,
+            Event::Pointer(Some((content.x + 70.0, input.y + 10.0))),
+        );
+        assert_eq!(app.cursor(&page(&app), &FixedMeasure), "text");
+        send(
+            &mut app,
+            Event::Release {
+                x: content.x + 70.0,
+                y: input.y + 10.0,
+            },
+        );
+        assert_eq!(selection(&app), (4, 9));
+        send(
+            &mut app,
+            Event::Press {
+                x: content.x,
+                y: input.y,
+                shift: true,
+                clicks: 1,
+            },
+        );
+        assert_eq!(selection(&app), (0, 4));
+        click_with(&mut app, (content.x + 50.0, input.y + 10.0), 2);
+        assert_eq!(selection(&app), (4, 12));
+        click_with(&mut app, (content.x + 50.0, input.y + 10.0), 3);
+        assert_eq!(selection(&app), (0, 12));
+
+        // A label focuses its input as it was; on the way, focus leaves it.
+        let email = form(&app).fields[1].clone();
+        click(&mut app, center(email.input));
+        send(
+            &mut app,
+            Event::Press {
+                x: email.label.rect.x,
+                y: email.label.rect.y,
+                shift: false,
+                clicks: 1,
+            },
+        );
+        assert_eq!(focus(&app), None);
+        assert!(app.state.error(Field::Email).is_some());
+        send(
+            &mut app,
+            Event::Release {
+                x: email.label.rect.x,
+                y: email.label.rect.y,
+            },
+        );
+        assert_eq!(focus(&app), Some(Control::Field(Field::Email)));
+    }
+
+    #[test]
+    fn dragging_after_a_double_click_selects_words() {
+        let mut app = focused();
+        type_text(&mut app, "Ada King Lovelace");
+        let input = form(&app).fields[0].input;
+        let x = content_box(input).x;
+        let y = input.y + 10.0;
+        // In the middle of a character, each 8px wide.
+        let at = |offset: f64| (x + offset * 8.0 + 4.0, y);
+        let (x, y) = at(5.0);
+        send(
+            &mut app,
+            Event::Press {
+                x,
+                y,
+                shift: false,
+                clicks: 2,
+            },
+        );
+        assert_eq!(selection(&app), (4, 8));
+        send(&mut app, Event::Pointer(Some(at(10.0))));
+        assert_eq!(selection(&app), (4, 17));
+        send(&mut app, Event::Pointer(Some(at(1.0))));
+        let editor = app.editor(Field::FullName);
+        assert_eq!((editor.anchor, editor.head), (8, 0));
+        // The release outside the window never comes, so blur ends the drag.
+        send(&mut app, Event::Blur);
+        send(&mut app, Event::Focus);
+        send(&mut app, Event::Pointer(Some(at(10.0))));
+        assert_eq!(selection(&app), (0, 8));
+    }
+
+    #[test]
+    fn dragging_near_or_past_an_input_side_scrolls_it_each_frame() {
+        let mut app = focused();
+        // 99 characters, 792px of text.
+        type_text(&mut app, &"Ada King ".repeat(11));
+        key(&mut app, "Home");
+        let input = form(&app).fields[0].input;
+        let content = content_box(input);
+        let y = input.y + 10.0;
+        let scroll = |app: &App| app.editor(Field::FullName).scroll;
+        let autoscrolling = |app: &App| app.autoscrolling(&page(app), &FixedMeasure);
+        send(
+            &mut app,
+            Event::Press {
+                x: content.x + 2.0,
+                y,
+                shift: false,
+                clicks: 1,
+            },
+        );
+        assert!(!autoscrolling(&app));
+        // The selection follows the pointer 10px past the right side, and
+        // each frame then scrolls 31px.
+        send(
+            &mut app,
+            Event::Pointer(Some(((content.x + content.width) + 10.0, y))),
+        );
+        assert_eq!((selection(&app), scroll(&app)), ((0, 44), 0.0));
+        assert!(autoscrolling(&app));
+        send(&mut app, Event::Autoscroll);
+        assert_eq!((selection(&app), scroll(&app)), ((0, 44), 31.0));
+        send(&mut app, Event::Autoscroll);
+        assert_eq!((selection(&app), scroll(&app)), ((0, 48), 62.0));
+        while autoscrolling(&app) {
+            send(&mut app, Event::Autoscroll);
+        }
+        assert_eq!((selection(&app), scroll(&app)), ((0, 99), 452.0));
+        assert_eq!(send(&mut app, Event::Autoscroll), Outcome::default());
+        // 5px inside the left side, each frame scrolls back 15px.
+        send(&mut app, Event::Pointer(Some((content.x + 5.0, y))));
+        send(&mut app, Event::Autoscroll);
+        assert_eq!((selection(&app), scroll(&app)), ((0, 57), 437.0));
+        // Away from the sides, or once the drag ends, the input stays.
+        send(&mut app, Event::Pointer(Some((content.x + 100.0, y))));
+        assert!(!autoscrolling(&app));
+        send(&mut app, Event::Pointer(Some((content.x - 10.0, y))));
+        send(&mut app, Event::Blur);
+        assert!(!autoscrolling(&app));
+    }
+
+    #[test]
+    fn the_checkbox_and_its_label_toggle_on_click() {
+        let mut app = App::new(DESKTOP_MOUSE);
+        let terms = form(&app).terms;
+        click(&mut app, center(terms.check));
+        assert!(app.state.values().accept_terms);
+        assert_eq!(focus(&app), Some(Control::Field(Field::AcceptTerms)));
+        assert!(!app.interaction(&page(&app)).focus_visible);
+        // Shortcuts with Ctrl leave the focus ring hidden, but other keys,
+        // even Shift alone, show it.
+        press(&mut app, "c", |key| key.ctrl = true);
+        assert!(!app.interaction(&page(&app)).focus_visible);
+        key(&mut app, "Shift");
+        assert!(app.interaction(&page(&app)).focus_visible);
+        click(
+            &mut app,
+            (terms.label.rect.x + 1.0, terms.label.rect.y + 1.0),
+        );
+        assert!(!app.state.values().accept_terms);
+        // A press that ends elsewhere is no click.
+        let pressed = Event::Press {
+            x: terms.check.x,
+            y: terms.check.y,
+            shift: false,
+            clicks: 1,
+        };
+        send(&mut app, pressed);
+        send(&mut app, Event::Release { x: 0.0, y: 0.0 });
+        assert!(!app.state.values().accept_terms);
+    }
+
+    /// Text half as wide as [`FixedMeasure`] makes it.
+    struct Narrow;
+
+    impl Measure for Narrow {
+        fn width(&self, text: &str, style: TextStyle) -> f64 {
+            FixedMeasure.width(text, style) / 2.0
+        }
+
+        fn metrics(&self, style: TextStyle) -> FontMetrics {
+            FixedMeasure.metrics(style)
+        }
+    }
+
+    #[test]
+    fn a_one_line_terms_label_ends_with_its_text() {
+        let app = App::default();
+        let page = layout(DESKTOP, &app.state, &Narrow);
+        let Content::Form(form) = &page.content else {
+            panic!("expected the form");
+        };
+        let label = &form.terms.label;
+        assert_eq!(label.lines.len(), 1);
+        let end = label.rect.x + Narrow.width(&label.lines[0], label.style);
+        let terms = Some(Target::Label(Field::AcceptTerms));
+        assert_eq!(hit(&page, (end - 1.0, label.rect.y + 1.0), &Narrow), terms);
+        assert_eq!(hit(&page, (end + 1.0, label.rect.y + 1.0), &Narrow), None);
+    }
+
+    #[test]
+    fn tab_continues_from_a_click_on_the_page() {
+        let mut app = focused();
+        let password = form(&app).fields[2].clone();
+        click(
+            &mut app,
+            (password.label.rect.x - 4.0, password.label.rect.y),
+        );
+        assert_eq!(focus(&app), None);
+        key(&mut app, "Tab");
+        assert_eq!(focus(&app), Some(Control::Field(Field::Password)));
+        // The full name's error moved the fields down.
+        let password = form(&app).fields[2].clone();
+        click(
+            &mut app,
+            (password.label.rect.x - 4.0, password.label.rect.y),
+        );
+        press(&mut app, "Tab", |key| key.shift = true);
+        assert_eq!(focus(&app), Some(Control::Field(Field::Email)));
+    }
+
+    #[test]
+    fn the_button_submits_and_waits_for_the_backend() {
+        let mut app = focused();
+        fill(&mut app);
+        let button = form(&app).button;
+        send(&mut app, Event::Pointer(Some(center(button))));
+        assert!(app.interaction(&page(&app)).hovered);
+        let Some(Effect::Send(request)) = click(&mut app, center(button)).effect else {
+            panic!("expected a request");
+        };
+        assert_eq!(request.full_name, "Ada Lovelace");
+        assert_eq!(app.cursor(&page(&app), &FixedMeasure), "wait");
+        // Locked: no second request, no typing, and no button to tab to.
+        assert_eq!(click(&mut app, center(button)).effect, None);
+        let confirm = form(&app).fields[3].input;
+        click(&mut app, center(confirm));
+        type_text(&mut app, "x");
+        assert_eq!(app.state.text(Field::ConfirmPassword), "Analytical#Engine1");
+        key(&mut app, "Tab");
+        assert!(!key(&mut app, "Tab").handled);
+        assert_eq!(focus(&app), None);
+
+        let outcome = send(&mut app, Event::Response(Ok(email_violation())));
+        assert_eq!(outcome.effect, Some(Effect::Focus));
+        send(&mut app, Event::Focus);
+        assert_eq!(focus(&app), Some(Control::Field(Field::Email)));
+        click(&mut app, center(button));
+        assert_eq!(
+            send(&mut app, Event::Response(Err(CallError::Http(503)))),
+            Outcome::default()
+        );
+        click(&mut app, center(button));
+        send(&mut app, Event::Response(Ok(SignUpResponse::default())));
+        assert_eq!(app.state.status(), Status::Success);
+        assert_eq!(focus(&app), None);
+        assert!(!app.interaction(&page(&app)).hovered);
+        assert!(!key(&mut app, "Tab").handled);
+    }
+
+    #[test]
     fn the_clipboard_copies_cuts_and_pastes() {
         let mut app = focused();
         assert_eq!(send(&mut app, Event::Copy), Outcome::default());
@@ -953,18 +1592,35 @@ mod tests {
     fn the_caret_blinks_in_the_focused_input() {
         let mut app = focused();
         assert!(key(&mut app, "a").blink);
-        assert!(app.interaction().caret_visible);
+        assert!(app.interaction(&page(&app)).caret_visible);
         send(&mut app, Event::Blink);
-        assert!(!app.interaction().caret_visible);
+        assert!(!app.interaction(&page(&app)).caret_visible);
         assert_eq!(send(&mut app, Event::Resize), Outcome::default());
         // It shows again at once when the window regains focus.
         send(&mut app, Event::Blur);
         assert!(send(&mut app, Event::Focus).blink);
-        assert!(app.interaction().caret_visible);
+        assert!(app.interaction(&page(&app)).caret_visible);
         // Out of the page, no caret blinks.
         for _ in 0..5 {
             assert!(key(&mut app, "Tab").blink);
         }
         assert!(!key(&mut app, "Tab").blink);
+    }
+
+    #[test]
+    fn the_pointer_sets_the_cursor_and_hovers() {
+        let mut app = focused();
+        let form = form(&app);
+        send(&mut app, Event::Pointer(Some(center(form.fields[0].input))));
+        assert_eq!(app.cursor(&page(&app), &FixedMeasure), "text");
+        send(&mut app, Event::Pointer(Some(center(form.button))));
+        assert_eq!(app.cursor(&page(&app), &FixedMeasure), "default");
+        send(&mut app, Event::Pointer(None));
+        assert!(!app.interaction(&page(&app)).hovered);
+        let mut touch = App::new(Device::default());
+        send(&mut touch, Event::Pointer(Some(center(form.button))));
+        assert!(!touch.interaction(&page(&touch)).hovered);
+        // A click on the page leaves no caret to blink.
+        assert!(!click(&mut app, (1.0, 1.0)).blink);
     }
 }

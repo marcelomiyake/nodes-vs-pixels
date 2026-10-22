@@ -608,9 +608,19 @@ impl Editor {
         } else if x < self.scroll {
             self.scroll = x.floor();
         }
-        let end = (text.width() - width).ceil().max(0.0);
-        self.scroll = self.scroll.clamp(0.0, end);
+        self.scroll = self.scroll.clamp(0.0, scroll_end(text, width));
     }
+
+    /// Scrolls by `delta`, never past the text's ends.
+    pub fn scroll_by(&mut self, text: &InputText, width: f64, delta: f64) {
+        self.scroll = (self.scroll + delta).clamp(0.0, scroll_end(text, width));
+    }
+}
+
+/// How far a content box `width` wide scrolls to show the end of `text`, by
+/// whole pixels.
+fn scroll_end(text: &InputText, width: f64) -> f64 {
+    (text.width() - width).ceil().max(0.0)
 }
 
 #[cfg(test)]
