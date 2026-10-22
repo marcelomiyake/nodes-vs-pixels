@@ -161,6 +161,94 @@ there are two ways:
               });
   ```
 
+## What each frontend cost to build
+
+Claude Code built the repository in one session, from `chore: scaffold
+monorepo workspace` to `fix(web-wasm): put the canvas in a main element`. It ran Claude Opus 5.5
+at extra-high effort for 11 hours, 7.3 of them active, in 1,148 API calls
+with 9 automatic compactions of its context. Claude Code estimated the
+session's cost at $110.52.
+
+Its log splits that work by area. Each API call goes to the area that its
+tool calls' paths and commands name (`web-react/` or `pnpm --filter
+web-react`; `web-wasm/`, `wasm-pack` or `wasm32`; both, as in the
+Playwright tests; or the shared projects), and a call without tool calls
+goes to the area of the call before it:
+
+| Area | API calls | Output tokens | All tokens | Active time |
+| --- | --- | --- | --- | --- |
+| `web-react` | 94 | 0.14 M | 22 M | 0.6 h |
+| `web-wasm` | 663 | 0.98 M | 150 M | 3.7 h |
+| Both frontends: e2e and parity tests, builds of both | 266 | 0.44 M | 59 M | 2.3 h |
+| Shared: contract, tokens, `form-core`, backend, SEO, deploy | 125 | 0.12 M | 22 M | 0.7 h |
+| Total | 1,148 | 1.67 M | 254 M | 7.3 h |
+
+Output tokens include the model's thinking. All tokens adds the input
+each call reads, which is almost all of them: every call reads the whole
+context again, about 220,000 tokens on average, mostly from the prompt
+cache. Active time counts the time from each call to the next, including
+the tools it ran, up to 5 minutes.
+
+The canvas frontend took about 7 times the React one: 7 times the API
+calls and output tokens, 6.8 times the tokens and 6 times the active time.
+Counting the work on both frontends half to each, it took 3.5 times as
+much; counting all of it to the canvas frontend, whose parity with the
+React one those tests check, 9.5 times. Every measure shares the session
+alike, so the cost does too: about $65 for `web-wasm`, $10 for
+`web-react`, $26 for both and $10 for the shared projects.
+
+The canvas frontend was built twice. Its first version painted the form
+but laid Chrome's native inputs over the canvas to take the keys, mouse
+and clipboard. Until then, the canvas frontend had taken 50 M tokens
+against React's 18 M, 2.8 times as many. Once the native inputs went,
+the canvas had to do everything they did, from carets and selection to
+undo, scrolling and the clipboard. That rework took the other 101 M of
+its tokens, and 32 M more on work on both frontends, mostly the tests
+that compare them.
+
+Codex's reviews show the same gap. It ran `codex review` 104 times,
+with GPT-6.1 Sol at medium effort, each in a session whose log names the
+commit it reviewed. A commit was reviewed again after each fix, so a
+commit's reviews are its review rounds:
+
+| Area | Reviews | Commits | Input tokens | Output tokens | Review time |
+| --- | --- | --- | --- | --- | --- |
+| `web-react` | 13 | 6 | 2.3 M | 11 k | 0.2 h |
+| `web-wasm` | 73 | 23 | 26.2 M | 157 k | 1.9 h |
+| Shared, tests and docs | 18 | 15 | 2.1 M | 12 k | 0.2 h |
+| Total | 104 | 44 | 30.6 M | 180 k | 2.3 h |
+
+Output tokens include the model's reasoning, and 88% of the input came
+from Codex's cache. Review time adds up each review's run, though some
+ran in parallel.
+
+- **The canvas frontend took 11 times React's review tokens** and 12 times
+  its review time. It had more commits, each took more rounds, 3.2 on
+  average against 2.2 and up to 9 for `feat(web-wasm): break canvas text
+  where Chrome does`, and each review read twice as much, 358,000 tokens
+  against 178,000.
+- **Reviews took an eighth as many tokens as writing the code:** 31 M
+  against Claude Code's 254 M. With both counted, the canvas frontend took
+  177 M tokens and the React one 24 M, 7.3 times as many.
+- **Codex ran on a ChatGPT Plus plan,** so its reviews had no per-token
+  cost. Over the session, the account's use of its weekly Codex limit rose
+  from 1% to 26%.
+
+Every commit made in the session has a review except
+`refactor(web-wasm): remove the overlay of native controls`, which no
+review log names.
+
+The code shows the same gap:
+
+| | `web-react` | `web-wasm` |
+| --- | --- | --- |
+| Commits | 6 | 24 |
+| Lines of source, with tests | 1,076 (373 of tests) | 7,553 (about 2,665 of tests) |
+
+These numbers leave out Claude Code's context compactions (about 2% of
+its session's tokens) and the later sessions that wrote documentation
+only.
+
 ## Running
 
 Needs Rust with the `wasm32-unknown-unknown` target, wasm-pack, Node.js with
