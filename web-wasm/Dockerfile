@@ -1,8 +1,11 @@
 # Build context: repository root (the app needs the shared proto, design, spec and seo sources).
+FROM node:26.13.1-bookworm-slim AS node
+
 FROM rust:1.99-slim-trixie AS build
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /src
 RUN apt-get update \
- && apt-get install -y --no-install-recommends make nodejs \
+ && apt-get install -y --no-install-recommends make \
  && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown \
  && cargo install --locked wasm-pack@0.15.0

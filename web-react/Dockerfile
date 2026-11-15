@@ -1,5 +1,5 @@
 # Build context: repository root (the app needs the shared proto, design, spec and seo sources).
-FROM node:24-alpine AS build
+FROM node:26.13.1-alpine AS build
 WORKDIR /src
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
