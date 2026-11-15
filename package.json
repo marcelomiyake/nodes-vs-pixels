@@ -4,6 +4,6 @@
   "type": "module",
   "packageManager": "pnpm@12.6.0",
   "engines": {
-    "node": ">=24"
+    "node": ">=26.13.1"
   }
 }
