@@ -1,7 +1,7 @@
 # Build context: repository root (the app needs the shared proto, design, spec and seo sources).
 FROM node:26.13.1-alpine AS build
 WORKDIR /src
-RUN corepack enable
+RUN npm install -g --no-fund --no-audit corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY seo/package.json seo/
 COPY web-react/package.json web-react/
